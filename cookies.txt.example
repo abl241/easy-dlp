@@ -1,0 +1,19 @@
+# Netscape HTTP Cookie File template
+#
+# This file is OPTIONAL. yt-dlp can use it to authenticate when downloading
+# age-restricted, private, or member-only videos. Without it the app will
+# still work for public videos.
+#
+# To populate it:
+#   1. Install a browser extension that exports cookies in "Netscape" format,
+#      e.g. "Get cookies.txt LOCALLY" (Chrome) or "cookies.txt" (Firefox).
+#   2. Log into YouTube in that browser.
+#   3. Export cookies for youtube.com and save them as `cookies.txt` (no .example).
+#   4. Either drop the file in this project root, OR point the app at it via
+#      the "Cookies file" field at the top of the window.
+#
+# This template file is checked in so it shows up in the repo. The real
+# cookies.txt is gitignored so you never accidentally commit credentials.
+#
+# Format example (one cookie per line, TAB-separated):
+# .youtube.com   TRUE   /   TRUE   1735689600   CONSENT   YES+cb
