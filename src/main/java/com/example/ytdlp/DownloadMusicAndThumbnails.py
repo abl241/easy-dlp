@@ -7,11 +7,12 @@ URLS = sys.argv[1]
 location = sys.argv[2]
 
 ydl_opts = {
+    'cookiefile': 'cookies.txt',
     'writethumbnail': True,
     'extract-audio': True,
     'add-metadata': True,
     'timeout': 25,
-    'ignoreerrors': True,
+    'ignoreerrors': False,
     #'embed-thumbnail': True,
 
     'outtmpl': location+'/%(title)s.%(ext)s',
@@ -24,6 +25,7 @@ ydl_opts = {
         'key': 'EmbedThumbnail',
     },],
 }
+
 
 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
     error_code = ydl.download(URLS)
