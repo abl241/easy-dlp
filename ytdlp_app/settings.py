@@ -6,6 +6,10 @@ directory so it travels across reinstalls and doesn't pollute the project tree:
     macOS:    ~/Library/Application Support/ytdlp-app/settings.json
     Linux:    $XDG_CONFIG_HOME/ytdlp-app/settings.json (default ~/.config/...)
     Windows:  %APPDATA%/ytdlp-app/settings.json
+
+Old-key migration: previous versions of the app split URLs into audio_url,
+video_url, and thumb_url. The new UI has one combined paste textbox so we
+fold those into `paste_urls` on load and drop the originals on next save.
 """
 
 from __future__ import annotations
@@ -22,22 +26,47 @@ from typing import Any
 _APP_NAME = "ytdlp-app"
 
 _DEFAULTS: dict[str, Any] = {
-    "audio_url": "",
+    # Output folders
     "audio_dir": str(Path.home() / "Music"),
-
-    "video_url": "",
     "video_dir": str(Path.home() / "Movies"),
-
-    "thumb_url": "",
     "thumb_dir": str(Path.home() / "Pictures"),
 
+    # Embed-tab paths
     "embed_video_dir": "",
     "embed_thumb_dir": "",
     "embed_out_dir": "",
-    "embed_mode": "folder",  # "folder" or "single"
+    "embed_mode": "folder",          # "folder" or "single"
 
-    "cookies_path": "",  # optional Netscape-format cookies file
+    # Optional cookies file
+    "cookies_path": "",
+
+    # Combined download tab state
+    "paste_urls": "",
+    "search_query": "",
+    "search_limit": 20,              # 10 | 20 | 50
+    "source_tab": "search",          # "search" or "paste"
+    "search_videos_only": True,      # drop channels/playlists/lives from results
+    "search_audio_only": False,      # drop music videos / lives heuristically
+
+    # UI collapse state
+    "panel_active_collapsed": False,
+    "panel_recent_collapsed": False,
+    "panel_log_collapsed": False,
+
+    # Default format selection on launch
+    "default_audio": True,
+    "default_video": False,
+    "default_thumb": False,
+
+    # Concurrency
+    "max_parallel_downloads": 2,
+
+    # Appearance
+    "theme": "system",               # "system" | "light" | "dark"
 }
+
+# Old keys to migrate away from on first load.
+_LEGACY_KEYS = ("audio_url", "video_url", "thumb_url")
 
 
 def _config_dir() -> Path:
@@ -53,10 +82,8 @@ def _config_dir() -> Path:
 class Settings:
     """Thread-safe JSON-backed settings store.
 
-    The in-memory dict and disk writes are guarded by a lock, but the lock is
-    released before the actual write() to avoid blocking other threads on disk
-    I/O — we serialize the snapshot to a string under the lock, then flush
-    outside it.
+    The in-memory dict is guarded by a lock, but disk writes happen outside
+    the lock to avoid blocking other threads on I/O.
     """
 
     def __init__(self, path: Path | None = None) -> None:
@@ -69,6 +96,8 @@ class Settings:
     def path(self) -> Path:
         return self._path
 
+    # --- IO -------------------------------------------------------------- #
+
     def _load(self) -> None:
         if not self._path.exists():
             return
@@ -76,13 +105,38 @@ class Settings:
             with self._path.open("r", encoding="utf-8") as f:
                 stored = json.load(f)
         except (OSError, json.JSONDecodeError):
-            return  # corrupt or unreadable; keep defaults
+            return
         if not isinstance(stored, dict):
             return
+
         with self._lock:
             for k, v in stored.items():
                 if k in _DEFAULTS:
                     self._data[k] = v
+            # Migrate legacy URL keys into `paste_urls`.
+            if not self._data.get("paste_urls"):
+                legacy_blobs = [
+                    str(stored[k]).strip()
+                    for k in _LEGACY_KEYS
+                    if isinstance(stored.get(k), str) and stored[k].strip()
+                ]
+                if legacy_blobs:
+                    self._data["paste_urls"] = "\n".join(legacy_blobs)
+            snapshot = json.dumps(self._data, indent=2)
+        # If anything changed during the load (migration), persist it.
+        self._flush(snapshot)
+
+    def _flush(self, snapshot: str) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                f.write(snapshot)
+            tmp.replace(self._path)
+        except OSError:
+            pass  # disk full / read-only — best-effort
+
+    # --- API ------------------------------------------------------------- #
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
@@ -104,13 +158,12 @@ class Settings:
             snapshot = json.dumps(self._data, indent=2)
         self._flush(snapshot)
 
-    def _flush(self, snapshot: str) -> None:
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".json.tmp")
-            with tmp.open("w", encoding="utf-8") as f:
-                f.write(snapshot)
-            tmp.replace(self._path)
-        except OSError:
-            # Best-effort: don't crash the UI if disk is full / read-only.
-            pass
+    def reset_to_defaults(self) -> None:
+        with self._lock:
+            self._data = copy.deepcopy(_DEFAULTS)
+            snapshot = json.dumps(self._data, indent=2)
+        self._flush(snapshot)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return copy.deepcopy(self._data)

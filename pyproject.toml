@@ -1,6 +1,6 @@
 [project]
 name = "ytdlp-app"
-version = "2.0.0"
+version = "2.1.0"
 description = "Simple desktop GUI for yt-dlp: download audio/video/thumbnails from YouTube and embed thumbnails into existing audio files."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -8,6 +8,7 @@ authors = [{ name = "Alex Lee" }]
 dependencies = [
     "yt-dlp>=2026.3.17",
     "customtkinter>=5.2.2",
+    "Pillow>=10.0.0",
 ]
 
 [project.scripts]
