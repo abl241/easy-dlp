@@ -1568,19 +1568,20 @@ class App(ctk.CTk):
 
     def _setup_scroll_forwarding(self) -> None:
         import os
-        # Temporarily always-on so we can diagnose macOS Tk 9 scroll snap-back
-        # without needing the user to remember to set an env var. Writes to
-        # both stderr and /tmp/ytdlp_scroll_debug.log.
-        debug = True
-        debug_path = "/tmp/ytdlp_scroll_debug.log"
-        try:
-            # Reset the log every launch.
-            with open(debug_path, "w") as f:
-                f.write("")
-        except Exception:  # noqa: BLE001
-            pass
+        # Diagnostic logging is opt-in: set YTDLP_SCROLL_DEBUG=1 to get
+        # per-event logs on stderr and at /tmp/ytdlp_scroll_debug.log.
+        debug = bool(os.environ.get("YTDLP_SCROLL_DEBUG"))
+        debug_path = "/tmp/ytdlp_scroll_debug.log" if debug else None
+        if debug:
+            try:
+                with open(debug_path, "w") as f:
+                    f.write("")
+            except Exception:  # noqa: BLE001
+                pass
 
         def _dlog(msg: str) -> None:
+            if not debug:
+                return
             print(msg, file=sys.stderr, flush=True)
             try:
                 with open(debug_path, "a") as f:
@@ -1726,7 +1727,8 @@ class App(ctk.CTk):
                     cur = f"<err {e}>"
                 _dlog(f"[scroll]   {label} Canvas/{seq}: {cur[:200]!r}")
 
-        _dump_bindings("BEFORE unbind")
+        if debug:
+            _dump_bindings("BEFORE unbind")
 
         # Wipe every existing scroll-related binding (CTk's plus anything
         # else) so we have full control over what scrolls.
@@ -1737,7 +1739,8 @@ class App(ctk.CTk):
             except Exception:  # noqa: BLE001
                 pass
 
-        _dump_bindings("AFTER unbind")
+        if debug:
+            _dump_bindings("AFTER unbind")
 
         if use_touchpad_only:
             # macOS Tk 9+: trackpad gestures AND mouse wheels both fire
