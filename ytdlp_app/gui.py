@@ -1033,6 +1033,9 @@ class App(ctk.CTk):
     # three CTkScrollableFrames: results, active downloads, recent jobs.
 
     def _setup_scroll_forwarding(self) -> None:
+        import os
+        debug = bool(os.environ.get("YTDLP_SCROLL_DEBUG"))
+
         # Collect the inner canvases that we want to scroll on wheel/touchpad.
         self._scroll_canvases: list = []
         for frame in (self.results_frame, self.active_frame, self.recent_frame):
@@ -1042,9 +1045,6 @@ class App(ctk.CTk):
                 pass
 
         def _find_target_canvas(widget):
-            # Walk the master chain of event.widget; return the first canvas
-            # we registered. (Each CTkScrollableFrame's inner Frame has its
-            # canvas as `.master`, so this terminates quickly.)
             seen = 0
             while widget is not None and seen < 100:
                 if widget in self._scroll_canvases:
@@ -1060,10 +1060,36 @@ class App(ctk.CTk):
                 pass
             return "break"
 
+        # On Tk 9 / macOS, a single trackpad tick fires both
+        # <TouchpadScroll> AND a synthesized <MouseWheel>. The two events
+        # can scroll in opposite directions and produce a "twitch then
+        # reset" effect. We dedup by accepting only one scroll within a
+        # short time window per event.time and event.serial.
+        self._last_scroll_time_ms = 0
+
+        def _accept_event(event) -> bool:
+            # Paired TouchpadScroll + MouseWheel from the same gesture tick
+            # arrive sub-millisecond apart on macOS Tk 9. A real next-tick
+            # event comes ~16ms later (60 Hz reporting). A 5 ms window
+            # catches the pair without throttling actual scrolling speed.
+            t = int(getattr(event, "time", 0) or 0)
+            if t and (t - self._last_scroll_time_ms) < 5:
+                return False
+            self._last_scroll_time_ms = t
+            return True
+
         def _on_mousewheel(event):
             canvas = _find_target_canvas(event.widget)
+            if debug:
+                print(
+                    f"[scroll] MouseWheel t={event.time} delta={event.delta} "
+                    f"state={event.state} num={getattr(event,'num',0)} "
+                    f"canvas={'yes' if canvas else 'no'}"
+                )
             if canvas is None:
                 return None
+            if not _accept_event(event):
+                return "break"
             num = getattr(event, "num", 0)
             if num == 4:
                 return _scroll_units(canvas, -3)
@@ -1077,43 +1103,43 @@ class App(ctk.CTk):
             if delta == 0:
                 return "break"
             if sys.platform == "darwin":
-                # macOS: delta is small (±1..±10), already signed.
                 step = max(-6, min(6, -delta))
                 return _scroll_units(canvas, step)
-            # Windows: multiples of 120. Linux X11 normally uses Button-4/5.
             return _scroll_units(canvas, -int(delta / 120) * 3)
 
         def _on_touchpad_scroll(event):
-            # Tk 9.0+: trackpad pan gesture. The event carries:
-            #   - state bits: 1=up, 2=down, 4=left, 8=right (direction flags)
-            #   - delta:      pixel dy magnitude on some Tk builds
-            # We fire on every gesture tick so a constant 1-unit step gives
-            # smooth-feeling scrolling without huge jumps. yview_scroll on
-            # macOS uses an 8px increment, so 1 unit ≈ 8 pixels.
+            # Tk 9 macOS trackpad pan gesture. `event.delta` carries the
+            # vertical pixel delta (dy). Positive dy = fingers moved down
+            # gesture; for natural scrolling we want the canvas to follow
+            # the gesture (page moves down with fingers).
             canvas = _find_target_canvas(event.widget)
+            if debug:
+                print(
+                    f"[scroll] TouchpadScroll t={event.time} delta={event.delta} "
+                    f"state={event.state} canvas={'yes' if canvas else 'no'}"
+                )
             if canvas is None:
                 return None
-            state = int(getattr(event, "state", 0) or 0)
-            delta = int(getattr(event, "delta", 0) or 0)
-            units = 0
-            if state & 1:    # fingers up → scroll content up
-                units -= 1
-            if state & 2:    # fingers down → scroll content down
-                units += 1
-            if units == 0 and delta:
-                # Some Tk builds skip the direction bits and pack dy here.
-                # macOS natural-scrolling convention: positive dy = page
-                # moves down = canvas yview goes up.
-                units = -1 if delta > 0 else 1
-            if units == 0:
+            if not _accept_event(event):
                 return "break"
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                return "break"
+            # Convert pixel delta to canvas "units" (8 px on macOS).
+            magnitude = max(1, min(6, abs(delta) // 8 or 1))
+            units = magnitude if delta < 0 else -magnitude
             return _scroll_units(canvas, units)
 
-        self.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+        # Replace CTk's MouseWheel bind_all rather than augmenting it. CTk
+        # walks ALL CTkScrollableFrames in the process per event and can
+        # fight our handler when a gesture fires multiple synthetic events.
+        try:
+            self.unbind_all("<MouseWheel>")
+        except Exception:  # noqa: BLE001
+            pass
+        self.bind_all("<MouseWheel>", _on_mousewheel)
         self.bind_all("<Button-4>", _on_mousewheel, add="+")
         self.bind_all("<Button-5>", _on_mousewheel, add="+")
-        # `<TouchpadScroll>` only exists on Tk 9.0+. Older builds would raise
-        # `_tkinter.TclError`; guard so we still run on Tk 8.6.
         try:
             self.bind_all("<TouchpadScroll>", _on_touchpad_scroll, add="+")
         except Exception:  # noqa: BLE001
