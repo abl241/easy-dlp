@@ -1,4 +1,4 @@
-"""Entry point: `python -m ytdlp_app` or the installed `ytdlp-app` script."""
+"""Entry point: `python -m ytdlp_app` or the installed `easy-dlp` script."""
 
 from __future__ import annotations
 

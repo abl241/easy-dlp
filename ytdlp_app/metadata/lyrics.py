@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-_USER_AGENT = "ytdlp-app/2.1 (music lyrics)"
+_USER_AGENT = "easy-dlp/2.1 (music lyrics)"
 _GET_URL = "https://lrclib.net/api/get"
 _SEARCH_URL = "https://lrclib.net/api/search"
 

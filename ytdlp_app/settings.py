@@ -3,9 +3,9 @@
 Replaces the Java app's data.json. Stored in the user's OS-appropriate config
 directory so it travels across reinstalls and doesn't pollute the project tree:
 
-    macOS:    ~/Library/Application Support/ytdlp-app/settings.json
-    Linux:    $XDG_CONFIG_HOME/ytdlp-app/settings.json (default ~/.config/...)
-    Windows:  %APPDATA%/ytdlp-app/settings.json
+    macOS:    ~/Library/Application Support/easy-dlp/settings.json
+    Linux:    $XDG_CONFIG_HOME/easy-dlp/settings.json (default ~/.config/...)
+    Windows:  %APPDATA%/easy-dlp/settings.json
 
 Old-key migration: previous versions of the app split URLs into audio_url,
 video_url, and thumb_url. The new UI has one combined paste textbox so we
@@ -23,7 +23,8 @@ from threading import Lock
 from typing import Any
 
 
-_APP_NAME = "ytdlp-app"
+_APP_NAME = "easy-dlp"
+_LEGACY_APP_NAME = "ytdlp-app"
 
 _DEFAULTS: dict[str, Any] = {
     # Output folders
@@ -47,6 +48,8 @@ _DEFAULTS: dict[str, Any] = {
     "music_source_tab": "search",    # "search" or "paste"
     "music_search_limit": 20,        # 10 | 20 | 50
     "music_download_lyrics": True,
+    "music_prefer_audio": True,
+    "music_search_audio_only": True,
 
     # Combined download tab state
     "paste_urls": "",
@@ -72,6 +75,12 @@ _DEFAULTS: dict[str, Any] = {
 
     # Appearance
     "theme": "system",               # "system" | "light" | "dark"
+
+    # Scroll direction for the results / active / recent panels.
+    #   "auto"     – follow macOS' "Natural scrolling" preference
+    #   "natural"  – content follows your fingers / wheel-up = page down
+    #   "inverted" – content moves opposite to fingers / wheel-up = page up
+    "scroll_direction": "auto",
 }
 
 # Old keys to migrate away from on first load.
@@ -88,6 +97,16 @@ def _config_dir() -> Path:
     return base / _APP_NAME
 
 
+def _legacy_config_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / _LEGACY_APP_NAME
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return base / _LEGACY_APP_NAME
+    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / _LEGACY_APP_NAME
+
+
 class Settings:
     """Thread-safe JSON-backed settings store.
 
@@ -96,10 +115,26 @@ class Settings:
     """
 
     def __init__(self, path: Path | None = None) -> None:
-        self._path = path or (_config_dir() / "settings.json")
+        new_path = _config_dir() / "settings.json"
+        if path is None:
+            legacy_path = _legacy_config_dir() / "settings.json"
+            load_path = (
+                legacy_path
+                if not new_path.exists() and legacy_path.exists()
+                else new_path
+            )
+            save_path = new_path
+        else:
+            load_path = path
+            save_path = path
+        self._path = load_path
+        self._save_path = save_path
         self._lock = Lock()
         self._data: dict[str, Any] = copy.deepcopy(_DEFAULTS)
         self._load()
+        if self._path != self._save_path:
+            self._path = self._save_path
+            self._flush(json.dumps(self._data, indent=2))
 
     @property
     def path(self) -> Path:
@@ -137,11 +172,12 @@ class Settings:
 
     def _flush(self, snapshot: str) -> None:
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".json.tmp")
+            target = self._save_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".json.tmp")
             with tmp.open("w", encoding="utf-8") as f:
                 f.write(snapshot)
-            tmp.replace(self._path)
+            tmp.replace(target)
         except OSError:
             pass  # disk full / read-only — best-effort
 

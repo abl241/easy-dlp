@@ -31,7 +31,7 @@ import customtkinter as ctk
 from . import __version__, thumbcache
 from .jobs import CANCELLED, DONE, FAILED, Job, JobQueue, QUEUED, RUNNING
 from .runtime import find_ffmpeg
-from .search import SearchResult, is_url
+from .search import SearchResult, is_url, resolve_urls
 from .settings import Settings, _config_dir
 
 _THUMB_SIZE = (120, 68)  # 16:9 thumbnail
@@ -57,6 +57,39 @@ _FORMAT_DEFAULT_KEY = {
 # ============================================================================
 # Helpers
 # ============================================================================
+
+def _detect_scroll_sign(settings) -> int:
+    """Return +1 if scrolling should follow Tk's default convention, or -1
+    if it should be inverted.
+
+    The user can force a specific direction via the `scroll_direction`
+    setting ("auto" | "natural" | "inverted"). In "auto" mode we read
+    macOS's "Natural scrolling" preference. On other platforms we trust
+    Tk's signs (+1).
+    """
+    pref = (settings.get("scroll_direction") or "auto").lower()
+    if pref == "natural":
+        return 1
+    if pref == "inverted":
+        return -1
+    if sys.platform != "darwin":
+        return 1
+    try:
+        out = subprocess.run(
+            ["defaults", "read", "-g", "com.apple.swipescrolldirection"],
+            capture_output=True, text=True, timeout=2,
+        )
+        value = out.stdout.strip()
+        # The key is only stored when the user has explicitly toggled
+        # "Natural scrolling" away from macOS's default (which is ON).
+        #  "1" / missing => Natural scrolling ON (default sign)
+        #  "0"           => Inverted from device => flip our sign
+        if value == "0":
+            return -1
+        return 1
+    except Exception:  # noqa: BLE001
+        return 1
+
 
 def _pick_folder(initial: str = "") -> str:
     return filedialog.askdirectory(initialdir=initial or str(Path.home())) or ""
@@ -97,7 +130,7 @@ class App(ctk.CTk):
         ctk.set_appearance_mode(self.settings.get("theme") or "system")
         ctk.set_default_color_theme("blue")
 
-        self.title(f"YTDLP {__version__}")
+        self.title(f"easy-dlp {__version__}")
         self.geometry("1000x900")
         self.minsize(900, 720)
 
@@ -136,6 +169,9 @@ class App(ctk.CTk):
         self._music_search_loading_more: bool = False
         self._music_search_more_exhausted: bool = False
         self._music_search_page_size: int = 20
+        self._music_search_audio_only: bool = bool(
+            self.settings.get("music_search_audio_only"),
+        )
         self._music_loading_more_label: ctk.CTkLabel | None = None
 
         # ----- build UI -----
@@ -356,6 +392,18 @@ class App(ctk.CTk):
             ),
         ).pack(side="left", padx=8, pady=6)
 
+        self.music_prefer_audio_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_prefer_audio")),
+        )
+        ctk.CTkCheckBox(
+            opts_frame,
+            text="Prefer audio",
+            variable=self.music_prefer_audio_var,
+            command=lambda: self.settings.set(
+                "music_prefer_audio", self.music_prefer_audio_var.get(),
+            ),
+        ).pack(side="left", padx=8, pady=6)
+
         ctk.CTkLabel(
             opts_frame,
             text="MP3 · title filename · metadata auto-applied",
@@ -432,10 +480,23 @@ class App(ctk.CTk):
             command=self._on_music_limit_change,
         ).pack(side="left", padx=2)
 
+        filt_row = ctk.CTkFrame(parent, fg_color="transparent")
+        filt_row.pack(fill="x", padx=8, pady=(0, 2))
+        self.music_search_audio_only_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_search_audio_only")),
+        )
+        ctk.CTkCheckBox(
+            filt_row,
+            text="Prefer audio (skip music videos & lives)",
+            variable=self.music_search_audio_only_var,
+            command=lambda: self.settings.set(
+                "music_search_audio_only", self.music_search_audio_only_var.get(),
+            ),
+        ).pack(side="left", padx=6)
+
         hint = ctk.CTkLabel(
             parent,
-            text="Audio-only results (music videos and lives are filtered out). "
-                 "Scroll to the bottom for more.",
+            text="Scroll to the bottom of the results for more.",
             text_color=("gray40", "gray70"),
             anchor="w",
         )
@@ -697,6 +758,27 @@ class App(ctk.CTk):
                 side="left", padx=6,
             )
 
+        scroll_row = ctk.CTkFrame(s_appear, fg_color="transparent")
+        scroll_row.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(scroll_row, text="Scroll direction:", width=220,
+                     anchor="w").pack(side="left")
+        scroll_var = ctk.StringVar(
+            value=self.settings.get("scroll_direction") or "auto"
+        )
+
+        def on_scroll_dir(_value=None) -> None:
+            v = scroll_var.get()
+            self.settings.set("scroll_direction", v)
+            self._scroll_sign = _detect_scroll_sign(self.settings)
+
+        for value, label in (("auto", "Auto (follow system)"),
+                             ("natural", "Natural"),
+                             ("inverted", "Inverted")):
+            ctk.CTkRadioButton(scroll_row, text=label, variable=scroll_var,
+                               value=value, command=on_scroll_dir).pack(
+                side="left", padx=6,
+            )
+
         # About
         s_about = section("About")
         ff = find_ffmpeg()
@@ -706,7 +788,7 @@ class App(ctk.CTk):
         except Exception:  # noqa: BLE001
             ytv = "unknown"
         about_lines = [
-            f"ytdlp-app   {__version__}",
+            f"easy-dlp   {__version__}",
             f"yt-dlp      {ytv}",
             f"ffmpeg      {ff or '(not found — install via brew install ffmpeg)'}",
             f"Settings    {self.settings.path}",
@@ -839,6 +921,7 @@ class App(ctk.CTk):
     def _music_job_params(self) -> dict[str, Any]:
         return {
             "download_lyrics": bool(self.music_lyrics_var.get()),
+            "prefer_audio": bool(self.music_prefer_audio_var.get()),
             "enrich_metadata": True,
         }
 
@@ -849,14 +932,22 @@ class App(ctk.CTk):
         *,
         out_dir: str,
         cookies: str | None,
+        result: SearchResult | None = None,
     ) -> None:
+        params = self._music_job_params()
+        if result is not None:
+            params["source_url"] = result.url
+            params["source_title"] = result.title
+            params["source_uploader"] = result.uploader
+            params["source_duration_s"] = result.duration_s
+            params["source_thumbnail_url"] = result.thumbnail_url
         self.jobs.enqueue(
             kind="music",
             label=label,
             url=url,
             output_dir=out_dir,
             cookies_path=cookies,
-            **self._music_job_params(),
+            **params,
         )
 
     def _do_search(self) -> None:
@@ -911,13 +1002,14 @@ class App(ctk.CTk):
         self._music_search_more_exhausted = False
         self._music_search_page_size = max(10, limit)
         self._music_pending_search_query = query if not is_url(query) else None
+        self._music_search_audio_only = bool(self.music_search_audio_only_var.get())
         label = f"Music search: {query[:60]}"
         self.jobs.enqueue(
             kind="search", label=label,
             query=query, limit=limit,
             cookies_path=cookies,
             videos_only=True,
-            audio_only=True,
+            audio_only=self._music_search_audio_only,
             results_context="music",
         )
 
@@ -1004,6 +1096,22 @@ class App(ctk.CTk):
             )
             return
         cookies = self.settings.get("cookies_path") or None
+        if self.music_prefer_audio_var.get():
+            for raw_url in urls:
+                results = resolve_urls([raw_url], cookies_path=cookies)
+                if not results:
+                    label = f"Music: {_truncate(raw_url, 80)}"
+                    self._enqueue_music_download(
+                        raw_url, label, out_dir=out_dir, cookies=cookies,
+                    )
+                    continue
+                for result in results:
+                    label = f"Music: {_truncate(result.display_title(60), 60)}"
+                    self._enqueue_music_download(
+                        result.url, label,
+                        out_dir=out_dir, cookies=cookies, result=result,
+                    )
+            return
         for url in urls:
             label = f"Music: {_truncate(url, 80)}"
             self._enqueue_music_download(
@@ -1053,7 +1161,7 @@ class App(ctk.CTk):
         cookies = self.settings.get("cookies_path") or None
         label = f"Music: {_truncate(result.display_title(60), 60)}"
         self._enqueue_music_download(
-            result.url, label, out_dir=out_dir, cookies=cookies,
+            result.url, label, out_dir=out_dir, cookies=cookies, result=result,
         )
 
     def _download_all(self, *, override: bool) -> None:
@@ -1107,7 +1215,7 @@ class App(ctk.CTk):
         for result in self.music_results:
             label = f"Music: {_truncate(result.display_title(60), 60)}"
             self._enqueue_music_download(
-                result.url, label, out_dir=out_dir, cookies=cookies,
+                result.url, label, out_dir=out_dir, cookies=cookies, result=result,
             )
 
     # ====================== Rendering ======================================
@@ -1237,7 +1345,7 @@ class App(ctk.CTk):
             already_loaded=already_loaded,
             cookies_path=cookies,
             videos_only=True,
-            audio_only=True,
+            audio_only=self._music_search_audio_only,
             results_context="music",
         )
 
@@ -1460,7 +1568,31 @@ class App(ctk.CTk):
 
     def _setup_scroll_forwarding(self) -> None:
         import os
-        debug = bool(os.environ.get("YTDLP_SCROLL_DEBUG"))
+        # Temporarily always-on so we can diagnose macOS Tk 9 scroll snap-back
+        # without needing the user to remember to set an env var. Writes to
+        # both stderr and /tmp/ytdlp_scroll_debug.log.
+        debug = True
+        debug_path = "/tmp/ytdlp_scroll_debug.log"
+        try:
+            # Reset the log every launch.
+            with open(debug_path, "w") as f:
+                f.write("")
+        except Exception:  # noqa: BLE001
+            pass
+
+        def _dlog(msg: str) -> None:
+            print(msg, file=sys.stderr, flush=True)
+            try:
+                with open(debug_path, "a") as f:
+                    f.write(msg + "\n")
+            except Exception:  # noqa: BLE001
+                pass
+
+        # macOS "natural scrolling" inverts the sign of dy that Tk receives.
+        # We detect the system preference once at startup and let Settings
+        # ("scroll_direction") override it manually. A signed multiplier of
+        # +1 means "matches macOS Notes/Safari", -1 means "inverted".
+        self._scroll_sign = _detect_scroll_sign(self.settings)
 
         # Collect the inner canvases that we want to scroll on wheel/touchpad.
         self._scroll_canvases: list = []
@@ -1486,46 +1618,51 @@ class App(ctk.CTk):
 
         def _scroll_units(canvas, units: int) -> str:
             try:
+                before = canvas.yview()
                 canvas.yview_scroll(units, "units")
+                if debug:
+                    after = canvas.yview()
+                    def _recheck(c=canvas, b=before, a=after, u=units):
+                        try:
+                            now = c.yview()
+                            _dlog(
+                                f"[scroll]   units={u:+d} "
+                                f"before={b[0]:.3f} after={a[0]:.3f} "
+                                f"now={now[0]:.3f}"
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    self.after(80, _recheck)
             except Exception:  # noqa: BLE001
                 pass
             return "break"
 
-        # On Tk 9 / macOS, a single trackpad tick fires both
-        # <TouchpadScroll> AND a synthesized <MouseWheel>. The two events
-        # can scroll in opposite directions and produce a "twitch then
-        # reset" effect. We dedup by accepting only one scroll within a
-        # short time window per event.time and event.serial.
-        self._last_scroll_time_ms = 0
-
-        def _accept_event(event) -> bool:
-            # Paired TouchpadScroll + MouseWheel from the same gesture tick
-            # arrive sub-millisecond apart on macOS Tk 9. A real next-tick
-            # event comes ~16ms later (60 Hz reporting). A 5 ms window
-            # catches the pair without throttling actual scrolling speed.
-            t = int(getattr(event, "time", 0) or 0)
-            if t and (t - self._last_scroll_time_ms) < 5:
-                return False
-            self._last_scroll_time_ms = t
-            return True
+        # Detect whether <TouchpadScroll> is supported (Tk 9+ on macOS/Aqua).
+        # If yes, we bind ONLY TouchpadScroll on this app and unbind any
+        # MouseWheel handlers (including CTk's) so we don't get paired,
+        # opposite-direction events from a single trackpad tick.
+        try:
+            patchlevel = self.tk.call("info", "patchlevel")
+            major = int(str(patchlevel).split(".", 1)[0])
+        except Exception:  # noqa: BLE001
+            major = 8
+        use_touchpad_only = (sys.platform == "darwin" and major >= 9)
 
         def _on_mousewheel(event):
             canvas = _find_target_canvas(event.widget)
-            if debug:
-                print(
-                    f"[scroll] MouseWheel t={event.time} delta={event.delta} "
-                    f"state={event.state} num={getattr(event,'num',0)} "
-                    f"canvas={'yes' if canvas else 'no'}"
-                )
+            _dlog(
+                f"[scroll] MouseWheel t={event.time} delta={event.delta} "
+                f"num={getattr(event,'num',0)} "
+                f"widget={event.widget.__class__.__name__} "
+                f"canvas={'yes' if canvas else 'no'}"
+            )
             if canvas is None:
                 return None
-            if not _accept_event(event):
-                return "break"
             num = getattr(event, "num", 0)
             if num == 4:
-                return _scroll_units(canvas, -3)
+                return _scroll_units(canvas, -3 * self._scroll_sign)
             if num == 5:
-                return _scroll_units(canvas, 3)
+                return _scroll_units(canvas, 3 * self._scroll_sign)
             delta = getattr(event, "delta", 0) or 0
             try:
                 delta = int(delta)
@@ -1534,47 +1671,92 @@ class App(ctk.CTk):
             if delta == 0:
                 return "break"
             if sys.platform == "darwin":
-                step = max(-6, min(6, -delta))
+                step = max(-6, min(6, -delta * self._scroll_sign))
                 return _scroll_units(canvas, step)
-            return _scroll_units(canvas, -int(delta / 120) * 3)
+            return _scroll_units(canvas, -int(delta / 120) * 3 * self._scroll_sign)
 
         def _on_touchpad_scroll(event):
-            # Tk 9 macOS trackpad pan gesture. `event.delta` carries the
-            # vertical pixel delta (dy). Positive dy = fingers moved down
-            # gesture; for natural scrolling we want the canvas to follow
-            # the gesture (page moves down with fingers).
+            # Tk 9 / macOS packs `(dx, dy)` into a single int as
+            #   delta = (dx << 16) | (dy & 0xFFFF)
+            # with each component being a 16-bit signed pixel delta.
+            # Older docs claim event.delta is just dy; that's wrong on
+            # Tk 9 macOS, where horizontal scroll capability moved the
+            # encoding to two-axis.
             canvas = _find_target_canvas(event.widget)
-            if debug:
-                print(
-                    f"[scroll] TouchpadScroll t={event.time} delta={event.delta} "
-                    f"state={event.state} canvas={'yes' if canvas else 'no'}"
-                )
-            if canvas is None:
-                return None
-            if not _accept_event(event):
-                return "break"
-            delta = int(getattr(event, "delta", 0) or 0)
-            if delta == 0:
-                return "break"
-            # Convert pixel delta to canvas "units" (8 px on macOS).
-            magnitude = max(1, min(6, abs(delta) // 8 or 1))
-            units = magnitude if delta < 0 else -magnitude
+            raw = int(getattr(event, "delta", 0) or 0)
+            dy = raw & 0xFFFF
+            if dy >= 0x8000:
+                dy -= 0x10000
+            dx = (raw >> 16) & 0xFFFF
+            if dx >= 0x8000:
+                dx -= 0x10000
+            _dlog(
+                f"[scroll] TouchpadScroll raw={raw} dx={dx} dy={dy} "
+                f"widget={event.widget.__class__.__name__} "
+                f"canvas={'yes' if canvas else 'no'}"
+            )
+            if canvas is None or dy == 0:
+                return "break" if canvas is not None else None
+            # Convert pixel dy to canvas units. macOS xscrollincrement=8 so
+            # ~1 unit per 8 px feels right; clamp so big momentum bursts
+            # don't fling the view.
+            magnitude = max(1, min(8, abs(dy) // 4 or 1))
+            # On macOS scrollingDeltaY: positive dy means the user's fingers
+            # moved UP (with natural scrolling on, that scrolls the page
+            # DOWN — content stays under the fingers). We want yview_scroll
+            # positive (= scroll DOWN) for "fingers moved up" by default.
+            units = magnitude if dy > 0 else -magnitude
+            units *= self._scroll_sign
             return _scroll_units(canvas, units)
 
-        # Replace CTk's MouseWheel bind_all rather than augmenting it. CTk
-        # walks ALL CTkScrollableFrames in the process per event and can
-        # fight our handler when a gesture fires multiple synthetic events.
-        try:
-            self.unbind_all("<MouseWheel>")
-        except Exception:  # noqa: BLE001
-            pass
-        self.bind_all("<MouseWheel>", _on_mousewheel)
-        self.bind_all("<Button-4>", _on_mousewheel, add="+")
-        self.bind_all("<Button-5>", _on_mousewheel, add="+")
-        try:
-            self.bind_all("<TouchpadScroll>", _on_touchpad_scroll, add="+")
-        except Exception:  # noqa: BLE001
-            pass
+        def _dump_bindings(label: str) -> None:
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>",
+                        "<TouchpadScroll>"):
+                try:
+                    cur = self.tk.call("bind", "all", seq)
+                except Exception as e:  # noqa: BLE001
+                    cur = f"<err {e}>"
+                _dlog(f"[scroll]   {label} all/{seq}: {cur[:200]!r}")
+            # Also dump Canvas class bindings — Tk Aqua may have built-in
+            # scroll handling on the Canvas class itself.
+            for seq in ("<MouseWheel>", "<TouchpadScroll>"):
+                try:
+                    cur = self.tk.call("bind", "Canvas", seq)
+                except Exception as e:  # noqa: BLE001
+                    cur = f"<err {e}>"
+                _dlog(f"[scroll]   {label} Canvas/{seq}: {cur[:200]!r}")
+
+        _dump_bindings("BEFORE unbind")
+
+        # Wipe every existing scroll-related binding (CTk's plus anything
+        # else) so we have full control over what scrolls.
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>",
+                    "<TouchpadScroll>"):
+            try:
+                self.unbind_all(seq)
+            except Exception:  # noqa: BLE001
+                pass
+
+        _dump_bindings("AFTER unbind")
+
+        if use_touchpad_only:
+            # macOS Tk 9+: trackpad gestures AND mouse wheels both fire
+            # <TouchpadScroll>. Bind only that to avoid paired-event twitch.
+            self.bind_all("<TouchpadScroll>", _on_touchpad_scroll)
+            if debug:
+                print(
+                    f"[scroll] Tk {patchlevel} on darwin/aqua — TouchpadScroll only",
+                    file=sys.stderr, flush=True,
+                )
+        else:
+            self.bind_all("<MouseWheel>", _on_mousewheel)
+            self.bind_all("<Button-4>", _on_mousewheel, add="+")
+            self.bind_all("<Button-5>", _on_mousewheel, add="+")
+            if debug:
+                print(
+                    f"[scroll] Tk {patchlevel} — MouseWheel/Button-4/5 only",
+                    file=sys.stderr, flush=True,
+                )
 
     def _bind_results_mousewheel(self, widget) -> None:
         # Kept as a public hook for places that previously called it

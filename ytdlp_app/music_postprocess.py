@@ -153,7 +153,7 @@ def process_track(
 def _fetch_url(url: str | None) -> bytes | None:
     if not url:
         return None
-    req = urllib.request.Request(url, headers={"User-Agent": "ytdlp-app/2.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "easy-dlp/2.1"})
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             return resp.read()

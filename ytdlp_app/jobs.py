@@ -244,8 +244,37 @@ class JobQueue:
                 job.error = result.message or "see log"
 
         elif job.kind == "music":
+            from . import search as se
+
+            url = params["url"]
+            if params.get("prefer_audio"):
+                orig = se.SearchResult(
+                    url=params.get("source_url") or url,
+                    title=params.get("source_title") or "",
+                    uploader=params.get("source_uploader") or "",
+                    duration_s=params.get("source_duration_s"),
+                    view_count=None,
+                    upload_date=None,
+                    thumbnail_url=params.get("source_thumbnail_url"),
+                )
+                if not params.get("source_title"):
+                    resolved = se.resolve_urls(
+                        [url],
+                        cookies_path=cookies,
+                        cancel_event=job.cancel_event,
+                        progress=log,
+                    )
+                    if resolved:
+                        orig = resolved[0]
+                url = se.find_preferred_audio_url(
+                    orig,
+                    cookies_path=cookies,
+                    cancel_event=job.cancel_event,
+                    progress=log,
+                )
+
             result = dl.download_music(
-                [params["url"]], params["output_dir"],
+                [url], params["output_dir"],
                 cookies_path=cookies,
                 progress=log,
                 on_pct=on_progress,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command launcher for YTDLP.
+# One-command launcher for easy-dlp.
 #
 #   ./run.sh                  - launch the app (sets up .venv on first run)
 #   ./run.sh --update         - upgrade dependencies inside the venv
@@ -74,7 +74,7 @@ update_deps() {
 }
 
 doctor() {
-  echo "=== YTDLP doctor ==="
+  echo "=== easy-dlp doctor ==="
   echo "Project root: $PROJECT_ROOT"
   echo
   echo "-- Host pythons with tkinter --"

@@ -95,6 +95,47 @@ def search_youtube(
     return results[: int(limit)] if len(results) > limit else results
 
 
+def find_preferred_audio_url(
+    original: SearchResult,
+    *,
+    cookies_path: str | None = None,
+    cancel_event: threading.Event | None = None,
+    progress: ProgressFn = lambda msg: None,
+) -> str:
+    """Search YouTube for an official-audio upload; fall back to `original.url`."""
+    if _is_already_preferred_audio(original):
+        return original.url
+
+    from .metadata.parse import parse_youtube_track
+
+    parsed = parse_youtube_track(original.title, original.uploader)
+    query = " ".join(x for x in (parsed.artist, parsed.title) if x).strip()
+    if not query:
+        query = original.title
+
+    progress(f"[music] searching audio for {query!r}...")
+    candidates = search_youtube(
+        query,
+        limit=10,
+        cookies_path=cookies_path,
+        cancel_event=cancel_event,
+        progress=progress,
+        videos_only=True,
+        audio_only=True,
+    )
+    if not candidates:
+        progress("[music] no audio alternative — using original link")
+        return original.url
+
+    best = _pick_best_audio_candidate(candidates, original, parsed)
+    if best is not None and best.url != original.url:
+        progress(f"[music] using audio: {best.display_title(70)}")
+        return best.url
+
+    progress("[music] no better audio — using original link")
+    return original.url
+
+
 def resolve_urls(
     urls: Iterable[str],
     *,
@@ -254,6 +295,94 @@ def _filter_audio_only(results: list[SearchResult]) -> list[SearchResult]:
             continue
         out.append(r)
     return out
+
+
+def _is_already_preferred_audio(result: SearchResult) -> bool:
+    """True when the link already looks like an audio-first upload."""
+    if result.uploader.endswith(" - Topic"):
+        return True
+    if _AUDIO_HINT_RE.search(result.title) and not _VIDEO_HINT_RE.search(result.title):
+        return True
+    kept = _filter_audio_only([result])
+    return bool(kept) and not _VIDEO_HINT_RE.search(result.title)
+
+
+def _pick_best_audio_candidate(
+    candidates: list[SearchResult],
+    original: SearchResult,
+    parsed: Any,
+) -> SearchResult | None:
+    best: SearchResult | None = None
+    best_score = 0.0
+    for c in candidates:
+        score = _score_audio_candidate(c, parsed, original)
+        if score > best_score:
+            best_score = score
+            best = c
+    if best_score < 0.55:
+        return None
+    return best
+
+
+def _score_audio_candidate(
+    candidate: SearchResult,
+    parsed: Any,
+    original: SearchResult,
+) -> float:
+    title_score = _token_overlap(candidate.title, parsed.title or original.title)
+    artist_score = (
+        _artist_overlap(candidate.uploader, parsed.artist)
+        if parsed.artist
+        else 0.4
+    )
+    if title_score < 0.45:
+        return 0.0
+    if parsed.artist and artist_score < 0.25:
+        return 0.0
+
+    score = title_score * 0.45 + artist_score * 0.35
+    if candidate.uploader.endswith(" - Topic"):
+        score += 0.15
+    if _AUDIO_HINT_RE.search(candidate.title):
+        score += 0.05
+    if original.duration_s and candidate.duration_s:
+        delta = abs(original.duration_s - candidate.duration_s)
+        if delta <= 3:
+            score += 0.15
+        elif delta <= 8:
+            score += 0.05
+        elif delta > 25:
+            score -= 0.25
+    return max(0.0, min(1.0, score))
+
+
+def _token_overlap(a: str, b: str) -> float:
+    ta = set(_normalize_tokens(a))
+    tb = set(_normalize_tokens(b))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _artist_overlap(candidate: str, query: str) -> float:
+    a = _normalize_tokens(query)
+    b = _normalize_tokens(candidate)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if a in b or b in a:
+        return 0.9
+    sa, sb = set(a.split()), set(b.split())
+    if sa <= sb or sb <= sa:
+        return 0.85
+    return _token_overlap(candidate, query)
+
+
+def _normalize_tokens(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _entry_to_result(entry: dict[str, Any], *, source: str) -> SearchResult | None:

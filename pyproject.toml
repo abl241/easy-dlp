@@ -1,7 +1,7 @@
 [project]
-name = "ytdlp-app"
+name = "easy-dlp"
 version = "2.1.0"
-description = "Simple desktop GUI for yt-dlp: download audio/video/thumbnails from YouTube and embed thumbnails into existing audio files."
+description = "easy-dlp — a polished desktop GUI for yt-dlp: search, download, and tag YouTube audio, video, and thumbnails."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Alex Lee" }]
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ytdlp-app = "ytdlp_app.__main__:main"
+easy-dlp = "ytdlp_app.__main__:main"
 
 [build-system]
 requires = ["setuptools>=68"]

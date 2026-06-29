@@ -32,7 +32,7 @@ _LOG = logging.getLogger(__name__)
 _MAX_CACHE = 256
 _MAX_WORKERS = 4
 _FETCH_TIMEOUT_S = 8
-_USER_AGENT = "Mozilla/5.0 (ytdlp-app thumbnail fetcher)"
+_USER_AGENT = "Mozilla/5.0 (easy-dlp thumbnail fetcher)"
 
 OnLoaded = Callable[[Optional[Image.Image]], None]
 

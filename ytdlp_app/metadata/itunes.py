@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-_USER_AGENT = "ytdlp-app/2.1 (music metadata)"
+_USER_AGENT = "easy-dlp/2.1 (music metadata)"
 _SEARCH_URL = "https://itunes.apple.com/search"
 _LOOKUP_URL = "https://itunes.apple.com/lookup"
 
