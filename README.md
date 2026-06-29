@@ -110,8 +110,8 @@ python3 -c "import tkinter; print('tkinter OK')"
 **Option A — Git clone (recommended)**
 
 ```bash
-git clone https://github.com/abl241/ytldp-app.git
-cd ytldp-app
+git clone https://github.com/abl241/easy-dlp.git
+cd easy-dlp
 ```
 
 **Option B — Download ZIP**
