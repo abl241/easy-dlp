@@ -45,8 +45,9 @@ _DEFAULTS: dict[str, Any] = {
     "search_query": "",
     "search_limit": 20,              # 10 | 20 | 50
     "source_tab": "search",          # "search" or "paste"
-    "search_videos_only": True,      # drop channels/playlists/lives from results
-    "search_audio_only": False,      # drop music videos / lives heuristically
+    # Channels/playlists are always filtered out (not a setting). Only
+    # the audio-only heuristic is user-togglable.
+    "search_audio_only": False,
 
     # UI collapse state
     "panel_active_collapsed": False,

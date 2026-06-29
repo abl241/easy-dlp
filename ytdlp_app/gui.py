@@ -124,7 +124,7 @@ class App(ctk.CTk):
         self._search_loading_more: bool = False
         self._search_more_exhausted: bool = False
         self._search_page_size: int = 20
-        self._search_videos_only: bool = bool(self.settings.get("search_videos_only"))
+        self._search_videos_only: bool = True
         self._search_audio_only: bool = bool(self.settings.get("search_audio_only"))
         self._loading_more_label: ctk.CTkLabel | None = None
 
@@ -139,6 +139,7 @@ class App(ctk.CTk):
         self._build_recent_panel()   # side="bottom" — above log
         self._build_active_panel()   # side="bottom" — above recent
         self._build_tabs()           # side="top", expand=True — fills the top
+        self._setup_results_scroll_class_binding()
         self._poll_msg_q()
         self._poll_scroll_bottom()
         self._ffmpeg_preflight()
@@ -257,23 +258,13 @@ class App(ctk.CTk):
                           variable=self.limit_var, width=70,
                           command=self._on_limit_change).pack(side="left", padx=2)
 
-        # Filter row.
+        # Filter row. Channels/playlists are *always* filtered out — they
+        # aren't downloadable as a single track and only confuse the list.
+        # Only "Prefer audio" is user-togglable.
         filt_row = ctk.CTkFrame(parent, fg_color="transparent")
         filt_row.pack(fill="x", padx=8, pady=(0, 2))
         ctk.CTkLabel(filt_row, text="Filters:",
                      text_color=("gray40", "gray70")).pack(side="left", padx=(2, 6))
-
-        self.filter_videos_only_var = ctk.BooleanVar(
-            value=bool(self.settings.get("search_videos_only"))
-        )
-        ctk.CTkCheckBox(
-            filt_row,
-            text="Videos only (hide channels & playlists)",
-            variable=self.filter_videos_only_var,
-            command=lambda: self.settings.set(
-                "search_videos_only", self.filter_videos_only_var.get()
-            ),
-        ).pack(side="left", padx=6)
 
         self.filter_audio_only_var = ctk.BooleanVar(
             value=bool(self.settings.get("search_audio_only"))
@@ -286,6 +277,12 @@ class App(ctk.CTk):
                 "search_audio_only", self.filter_audio_only_var.get()
             ),
         ).pack(side="left", padx=6)
+
+        ctk.CTkLabel(
+            filt_row,
+            text="(channels & playlists are always hidden)",
+            text_color=("gray50", "gray60"),
+        ).pack(side="left", padx=(12, 0))
 
         hint = ctk.CTkLabel(
             parent,
@@ -695,8 +692,9 @@ class App(ctk.CTk):
         self._search_page_size = max(10, limit)
         self._pending_search_query = query if not is_url(query) else None
         # Snapshot the filter flags at search time so a paginated "load more"
-        # uses the same filters even if the user toggles them later.
-        self._search_videos_only = bool(self.filter_videos_only_var.get())
+        # uses the same filters even if the user toggles them later. Videos-
+        # only is always on (channel/playlist entries aren't downloadable).
+        self._search_videos_only = True
         self._search_audio_only = bool(self.filter_audio_only_var.get())
         label = f"Search: {query[:60]}"
         self.jobs.enqueue(
@@ -1024,47 +1022,71 @@ class App(ctk.CTk):
 
     # ====================== Mouse wheel forwarding ==========================
     #
-    # CTkScrollableFrame binds <MouseWheel> on its own canvas, but events that
-    # land on child widgets (labels, buttons, the thumbnail image) don't reach
-    # the canvas, so the wheel "stops working" once your pointer is over a
-    # row. Forward each child's wheel event to the canvas explicitly.
+    # CTkScrollableFrame uses `bind_all("<MouseWheel>", …)` and walks the
+    # widget master chain to decide which canvas should scroll. When events
+    # land on a nested child (the thumbnail label, a button, etc.) the
+    # dispatch is unreliable on macOS — wheel events get "absorbed" by the
+    # child and CTk's handler never sees them. We work around this by:
+    #
+    # 1) Creating a dedicated Tk bindtag ("ResultsScroll") and binding the
+    #    wheel handlers on the *class* tag — once, at startup. Class-tag
+    #    bindings are unaffected by anything CTk does on individual canvases.
+    # 2) Splicing that bindtag into every result-row descendant. Tk processes
+    #    bindtags in order (widget, class, our tag, toplevel, all), so the
+    #    wheel handler fires regardless of which child the event lands on.
 
-    def _bind_results_mousewheel(self, widget) -> None:
-        try:
-            canvas = self.results_frame._parent_canvas  # noqa: SLF001
-        except AttributeError:
-            return
+    _RESULTS_SCROLL_TAG = "YTDLPResultsScroll"
 
+    def _setup_results_scroll_class_binding(self) -> None:
         def _scroll(amount: int) -> str:
             try:
+                canvas = self.results_frame._parent_canvas  # noqa: SLF001
                 canvas.yview_scroll(amount, "units")
             except Exception:  # noqa: BLE001
                 pass
             return "break"
 
         def _on_wheel(event):
-            # macOS: event.delta is small (±1, ±3, …) and already signed.
-            # Windows: event.delta is a multiple of 120.
-            # Linux: separate Button-4 / Button-5 events.
+            # Linux uses Button-4/5 (no delta), macOS uses small signed
+            # delta (±1, ±3, …), Windows uses delta as multiples of 120.
             if getattr(event, "num", 0) == 4:
                 return _scroll(-3)
             if getattr(event, "num", 0) == 5:
                 return _scroll(3)
-            delta = int(getattr(event, "delta", 0))
+            delta = getattr(event, "delta", 0) or 0
+            try:
+                delta = int(delta)
+            except (TypeError, ValueError):
+                return "break"
             if delta == 0:
                 return "break"
             if sys.platform == "darwin":
-                return _scroll(-delta)
+                # On macOS, delta is in "lines" and already signed; clamp so
+                # huge wheel events don't yank the view across the page.
+                step = max(-6, min(6, -delta))
+                return _scroll(step)
             return _scroll(-int(delta / 120) * 3)
 
-        def _bind_recursive(w) -> None:
-            w.bind("<MouseWheel>", _on_wheel, add="+")
-            w.bind("<Button-4>", _on_wheel, add="+")
-            w.bind("<Button-5>", _on_wheel, add="+")
-            for child in w.winfo_children():
-                _bind_recursive(child)
+        self.bind_class(self._RESULTS_SCROLL_TAG, "<MouseWheel>", _on_wheel)
+        self.bind_class(self._RESULTS_SCROLL_TAG, "<Button-4>", _on_wheel)
+        self.bind_class(self._RESULTS_SCROLL_TAG, "<Button-5>", _on_wheel)
 
-        _bind_recursive(widget)
+    def _bind_results_mousewheel(self, widget) -> None:
+        tag = self._RESULTS_SCROLL_TAG
+        def _splice(w) -> None:
+            tags = w.bindtags()
+            if tag in tags:
+                return
+            # Insert after the widget's class tag so the handler runs
+            # before any toplevel/"all" bindings.
+            new_tags = tags[:2] + (tag,) + tags[2:]
+            try:
+                w.bindtags(new_tags)
+            except Exception:  # noqa: BLE001
+                pass
+            for child in w.winfo_children():
+                _splice(child)
+        _splice(widget)
 
     # ====================== Misc UI =========================================
 
