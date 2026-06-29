@@ -9,6 +9,7 @@ dependencies = [
     "yt-dlp>=2026.3.17",
     "customtkinter>=5.2.2",
     "Pillow>=10.0.0",
+    "mutagen>=1.47.0",
 ]
 
 [project.scripts]

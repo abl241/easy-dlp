@@ -40,6 +40,14 @@ _DEFAULTS: dict[str, Any] = {
     # Optional cookies file
     "cookies_path": "",
 
+    # Music tab
+    "music_dir": str(Path.home() / "Music"),
+    "music_search_query": "",
+    "music_paste_urls": "",
+    "music_source_tab": "search",    # "search" or "paste"
+    "music_search_limit": 20,        # 10 | 20 | 50
+    "music_download_lyrics": True,
+
     # Combined download tab state
     "paste_urls": "",
     "search_query": "",

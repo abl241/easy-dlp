@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional
 
 from . import downloader as dl
 from . import embed as em
+from . import music_postprocess as mp
 
 
 # ---------------------------- public data model --------------------------- #
@@ -241,6 +242,48 @@ class JobQueue:
             if not result.success:
                 job.state = FAILED
                 job.error = result.message or "see log"
+
+        elif job.kind == "music":
+            result = dl.download_music(
+                [params["url"]], params["output_dir"],
+                cookies_path=cookies,
+                progress=log,
+                on_pct=on_progress,
+                cancel_event=job.cancel_event,
+            )
+            if not result.success:
+                job.state = FAILED
+                job.error = result.message or "see log"
+            elif result.output_paths:
+                enrich = bool(params.get("enrich_metadata", True))
+                lyrics = bool(params.get("download_lyrics", True))
+                for i, path in enumerate(result.output_paths):
+                    info = (
+                        result.track_infos[i]
+                        if i < len(result.track_infos)
+                        else None
+                    )
+                    track_info = mp.TrackInfo(
+                        title=info.title if info else "",
+                        uploader=info.uploader if info else "",
+                        parsed_artist=info.parsed_artist if info else "",
+                        parsed_title=info.parsed_title if info else "",
+                        duration_s=info.duration_s if info else None,
+                        thumbnail_url=info.thumbnail_url if info else None,
+                        itunes_match=info.itunes_match if info else None,
+                    )
+                    pp = mp.process_track(
+                        path,
+                        track_info=track_info,
+                        enrich_metadata=enrich,
+                        download_lyrics=lyrics,
+                        progress=log,
+                        cancel_event=job.cancel_event,
+                    )
+                    if not pp.success:
+                        job.state = FAILED
+                        job.error = pp.message or "post-process failed"
+                        break
 
         elif job.kind == "embed_single":
             result = em.embed_single(

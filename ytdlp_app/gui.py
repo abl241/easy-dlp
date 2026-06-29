@@ -3,7 +3,7 @@
 Layout:
 
     +-----------------------------------------------------------+
-    |  Tabs: [Download | Embed Thumbnail | Settings]            |
+    |  Tabs: [Download | Music | Embed Thumbnail | Settings]            |
     |                                                           |
     |  ... tab content ...                                      |
     |                                                           |
@@ -128,6 +128,16 @@ class App(ctk.CTk):
         self._search_audio_only: bool = bool(self.settings.get("search_audio_only"))
         self._loading_more_label: ctk.CTkLabel | None = None
 
+        # Music tab state (separate from Download tab results).
+        self.music_results: list[SearchResult] = []
+        self._music_result_rows: list[_ResultRow] = []
+        self._music_search_query: str | None = None
+        self._music_pending_search_query: str | None = None
+        self._music_search_loading_more: bool = False
+        self._music_search_more_exhausted: bool = False
+        self._music_search_page_size: int = 20
+        self._music_loading_more_label: ctk.CTkLabel | None = None
+
         # ----- build UI -----
         # Pack order matters: bottom widgets are packed first (innermost first
         # when stacking from the same side). We want, top -> bottom:
@@ -154,10 +164,12 @@ class App(ctk.CTk):
         self.tabs.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
         self.download_tab = self.tabs.add("Download")
+        self.music_tab = self.tabs.add("Music")
         self.embed_tab = self.tabs.add("Embed Thumbnail")
         self.settings_tab = self.tabs.add("Settings")
 
         self._build_download_tab(self.download_tab)
+        self._build_music_tab(self.music_tab)
         self._build_embed_tab(self.embed_tab)
         self._build_settings_tab(self.settings_tab)
 
@@ -317,6 +329,142 @@ class App(ctk.CTk):
             side="left", padx=2,
         )
 
+    # ------------------------- Music tab ------------------------------------
+
+    def _build_music_tab(self, parent) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=0)
+        parent.grid_rowconfigure(1, weight=0)
+        parent.grid_rowconfigure(2, weight=1)
+
+        opts_frame = ctk.CTkFrame(parent)
+        opts_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        ctk.CTkLabel(
+            opts_frame, text="Music mode:", anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=(10, 8), pady=6)
+
+        self.music_lyrics_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_download_lyrics")),
+        )
+        ctk.CTkCheckBox(
+            opts_frame,
+            text="Download lyrics",
+            variable=self.music_lyrics_var,
+            command=lambda: self.settings.set(
+                "music_download_lyrics", self.music_lyrics_var.get(),
+            ),
+        ).pack(side="left", padx=8, pady=6)
+
+        ctk.CTkLabel(
+            opts_frame,
+            text="MP3 · title filename · metadata auto-applied",
+            text_color=("gray40", "gray70"),
+        ).pack(side="left", padx=(4, 8), pady=6)
+
+        ctk.CTkButton(
+            opts_frame, text="Output folder…", width=140,
+            fg_color="transparent", border_width=1,
+            command=lambda: self.tabs.set("Settings"),
+        ).pack(side="right", padx=10, pady=6)
+
+        self.music_source_tabs = ctk.CTkTabview(parent, height=140)
+        self.music_source_tabs.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
+        self._build_music_search_subtab(self.music_source_tabs.add("Search YouTube"))
+        self._build_music_paste_subtab(self.music_source_tabs.add("Paste URLs"))
+        last = self.settings.get("music_source_tab") or "search"
+        self.music_source_tabs.set(
+            "Search YouTube" if last == "search" else "Paste URLs",
+        )
+
+        res_outer = ctk.CTkFrame(parent)
+        res_outer.grid(row=2, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        res_outer.grid_columnconfigure(0, weight=1)
+        res_outer.grid_rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(res_outer, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 2))
+        self.music_results_header_label = ctk.CTkLabel(
+            header, text="Results (0) — search or paste a URL above",
+            anchor="w", font=ctk.CTkFont(weight="bold"),
+        )
+        self.music_results_header_label.pack(side="left", padx=4)
+        ctk.CTkButton(header, text="Clear", width=70,
+                      command=self._music_clear_results).pack(side="right", padx=2)
+        ctk.CTkButton(header, text="📁", width=44,
+                      command=lambda: self._music_download_all(override=True)).pack(
+            side="right", padx=2,
+        )
+        ctk.CTkButton(header, text="Download all", width=130,
+                      command=lambda: self._music_download_all(override=False)).pack(
+            side="right", padx=2,
+        )
+
+        self.music_results_frame = ctk.CTkScrollableFrame(res_outer)
+        self.music_results_frame.grid(row=1, column=0, sticky="nsew",
+                                      padx=6, pady=(0, 6))
+        self._music_render_results()
+
+    def _build_music_search_subtab(self, parent) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=(8, 2))
+
+        self.music_search_var = ctk.StringVar(
+            value=self.settings.get("music_search_query"),
+        )
+        entry = ctk.CTkEntry(
+            row, textvariable=self.music_search_var,
+            placeholder_text="Search for a song, or paste a YouTube URL",
+        )
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        entry.bind("<Return>", lambda _e: self._music_do_search())
+
+        ctk.CTkButton(row, text="Search", width=100,
+                      command=self._music_do_search).pack(side="left", padx=2)
+
+        ctk.CTkLabel(row, text="Limit:").pack(side="left", padx=(8, 2))
+        self.music_limit_var = ctk.StringVar(
+            value=str(self.settings.get("music_search_limit") or 20),
+        )
+        ctk.CTkOptionMenu(
+            row, values=["10", "20", "50"],
+            variable=self.music_limit_var, width=70,
+            command=self._on_music_limit_change,
+        ).pack(side="left", padx=2)
+
+        hint = ctk.CTkLabel(
+            parent,
+            text="Audio-only results (music videos and lives are filtered out). "
+                 "Scroll to the bottom for more.",
+            text_color=("gray40", "gray70"),
+            anchor="w",
+        )
+        hint.pack(fill="x", padx=12, pady=(4, 4))
+
+    def _build_music_paste_subtab(self, parent) -> None:
+        ctk.CTkLabel(
+            parent,
+            text="Paste one URL per line. Playlists expand into individual tracks.",
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(8, 2))
+
+        self.music_paste_box = ctk.CTkTextbox(parent, height=55)
+        self.music_paste_box.pack(fill="x", padx=10, pady=4)
+        self.music_paste_box.insert("1.0", self.settings.get("music_paste_urls") or "")
+
+        btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_row.pack(fill="x", padx=10, pady=(2, 8))
+        ctk.CTkButton(btn_row, text="Resolve & Pick", width=160,
+                      command=self._music_do_resolve).pack(side="left", padx=2)
+        ctk.CTkButton(btn_row, text="Download all immediately", width=210,
+                      command=lambda: self._music_paste_download_all(override=False)).pack(
+            side="left", padx=2,
+        )
+        ctk.CTkButton(btn_row, text="📁", width=44,
+                      command=lambda: self._music_paste_download_all(override=True)).pack(
+            side="left", padx=2,
+        )
+
     # ------------------------- Embed tab ------------------------------------
 
     def _build_embed_tab(self, parent) -> None:
@@ -447,6 +595,18 @@ class App(ctk.CTk):
             _path_row(s_out, _FORMAT_LABELS[fmt] + ":",
                       self.settings.get(_FORMAT_DIR_KEY[fmt]),
                       on_change, kind="folder")
+
+        s_music = section("Music mode")
+        _path_row(s_music, "Music output folder:",
+                  self.settings.get("music_dir"),
+                  lambda v: self.settings.set("music_dir", v),
+                  kind="folder")
+        ctk.CTkLabel(
+            s_music,
+            text=("Downloads MP3 files named by track title. Artist, album, "
+                  "cover art, and lyrics are written into file metadata."),
+            text_color=("gray40", "gray70"), wraplength=820, justify="left",
+        ).pack(fill="x", padx=14, pady=(0, 8), anchor="w")
 
         # Cookies
         s_cookies = section("Cookies (optional)")
@@ -670,6 +830,35 @@ class App(ctk.CTk):
         except (TypeError, ValueError):
             pass
 
+    def _on_music_limit_change(self, value: str) -> None:
+        try:
+            self.settings.set("music_search_limit", int(value))
+        except (TypeError, ValueError):
+            pass
+
+    def _music_job_params(self) -> dict[str, Any]:
+        return {
+            "download_lyrics": bool(self.music_lyrics_var.get()),
+            "enrich_metadata": True,
+        }
+
+    def _enqueue_music_download(
+        self,
+        url: str,
+        label: str,
+        *,
+        out_dir: str,
+        cookies: str | None,
+    ) -> None:
+        self.jobs.enqueue(
+            kind="music",
+            label=label,
+            url=url,
+            output_dir=out_dir,
+            cookies_path=cookies,
+            **self._music_job_params(),
+        )
+
     def _do_search(self) -> None:
         query = self.search_var.get().strip()
         self.settings.set("search_query", query)
@@ -705,6 +894,33 @@ class App(ctk.CTk):
             audio_only=self._search_audio_only,
         )
 
+    def _music_do_search(self) -> None:
+        query = self.music_search_var.get().strip()
+        self.settings.set("music_search_query", query)
+        self.settings.set("music_source_tab", "search")
+        if not query:
+            self._set_status("Enter a search query or URL.")
+            return
+        try:
+            limit = int(self.music_limit_var.get())
+        except (TypeError, ValueError):
+            limit = 20
+        cookies = self.settings.get("cookies_path") or None
+        self._music_search_query = None
+        self._music_search_loading_more = False
+        self._music_search_more_exhausted = False
+        self._music_search_page_size = max(10, limit)
+        self._music_pending_search_query = query if not is_url(query) else None
+        label = f"Music search: {query[:60]}"
+        self.jobs.enqueue(
+            kind="search", label=label,
+            query=query, limit=limit,
+            cookies_path=cookies,
+            videos_only=True,
+            audio_only=True,
+            results_context="music",
+        )
+
     def _do_resolve(self) -> None:
         text = self.paste_box.get("1.0", "end").strip()
         self.settings.set("paste_urls", text)
@@ -717,6 +933,21 @@ class App(ctk.CTk):
         self.jobs.enqueue(
             kind="resolve", label=f"Resolve {len(urls)} URL(s)",
             urls=urls, cookies_path=cookies,
+        )
+
+    def _music_do_resolve(self) -> None:
+        text = self.music_paste_box.get("1.0", "end").strip()
+        self.settings.set("music_paste_urls", text)
+        self.settings.set("music_source_tab", "paste")
+        urls = [u for u in text.splitlines() if u.strip() and is_url(u.strip())]
+        if not urls:
+            self._set_status("Paste one or more YouTube URLs first.")
+            return
+        cookies = self.settings.get("cookies_path") or None
+        self.jobs.enqueue(
+            kind="resolve", label=f"Music resolve {len(urls)} URL(s)",
+            urls=urls, cookies_path=cookies,
+            results_context="music",
         )
 
     def _paste_download_all(self, *, override: bool) -> None:
@@ -753,6 +984,32 @@ class App(ctk.CTk):
                     cookies_path=cookies,
                 )
 
+    def _music_paste_download_all(self, *, override: bool) -> None:
+        text = self.music_paste_box.get("1.0", "end").strip()
+        self.settings.set("music_paste_urls", text)
+        urls = [u.strip() for u in text.splitlines() if u.strip() and is_url(u.strip())]
+        if not urls:
+            self._set_status("Paste one or more YouTube URLs first.")
+            return
+        out_override = None
+        if override:
+            out_override = _pick_folder()
+            if not out_override:
+                return
+        out_dir = out_override or self.settings.get("music_dir")
+        if not out_dir:
+            messagebox.showinfo(
+                "Missing output folder",
+                "Configure a music output folder in Settings.",
+            )
+            return
+        cookies = self.settings.get("cookies_path") or None
+        for url in urls:
+            label = f"Music: {_truncate(url, 80)}"
+            self._enqueue_music_download(
+                url, label, out_dir=out_dir, cookies=cookies,
+            )
+
     def _download_one(self, result: SearchResult, *, override: bool) -> None:
         formats = self._checked_formats()
         if not formats:
@@ -779,6 +1036,25 @@ class App(ctk.CTk):
                 url=result.url, output_dir=out_dir,
                 cookies_path=cookies,
             )
+
+    def _music_download_one(self, result: SearchResult, *, override: bool) -> None:
+        out_override = None
+        if override:
+            out_override = _pick_folder()
+            if not out_override:
+                return
+        out_dir = out_override or self.settings.get("music_dir")
+        if not out_dir:
+            messagebox.showinfo(
+                "Missing output folder",
+                "Configure a music output folder in Settings.",
+            )
+            return
+        cookies = self.settings.get("cookies_path") or None
+        label = f"Music: {_truncate(result.display_title(60), 60)}"
+        self._enqueue_music_download(
+            result.url, label, out_dir=out_dir, cookies=cookies,
+        )
 
     def _download_all(self, *, override: bool) -> None:
         if not self.results:
@@ -811,6 +1087,29 @@ class App(ctk.CTk):
                     cookies_path=cookies,
                 )
 
+    def _music_download_all(self, *, override: bool) -> None:
+        if not self.music_results:
+            self._set_status("No results to download.")
+            return
+        out_override = None
+        if override:
+            out_override = _pick_folder()
+            if not out_override:
+                return
+        out_dir = out_override or self.settings.get("music_dir")
+        if not out_dir:
+            messagebox.showinfo(
+                "Missing output folder",
+                "Configure a music output folder in Settings.",
+            )
+            return
+        cookies = self.settings.get("cookies_path") or None
+        for result in self.music_results:
+            label = f"Music: {_truncate(result.display_title(60), 60)}"
+            self._enqueue_music_download(
+                result.url, label, out_dir=out_dir, cookies=cookies,
+            )
+
     # ====================== Rendering ======================================
 
     def _render_results(self) -> None:
@@ -837,27 +1136,64 @@ class App(ctk.CTk):
         self._clear_loading_indicator()
         self._render_results()
 
+    def _music_render_results(self) -> None:
+        self._music_clear_loading_indicator()
+        for row in self._music_result_rows:
+            row.destroy()
+        self._music_result_rows.clear()
+
+        for r in self.music_results:
+            self._music_result_rows.append(
+                _ResultRow(self.music_results_frame, r, self, mode="music"),
+            )
+
+        if self.music_results:
+            self.music_results_header_label.configure(
+                text=f"Results ({len(self.music_results)})",
+            )
+        else:
+            self.music_results_header_label.configure(
+                text="Results (0) — search or paste a URL above",
+            )
+
+    def _music_clear_results(self) -> None:
+        self.music_results = []
+        self._music_search_query = None
+        self._music_search_loading_more = False
+        self._music_search_more_exhausted = False
+        self._music_clear_loading_indicator()
+        self._music_render_results()
+
     # ====================== Infinite scroll =================================
 
     def _poll_scroll_bottom(self) -> None:
         """Detect when the user has scrolled near the bottom of results
         and kick off a `search_more` job to append the next page."""
         try:
-            if (
-                self._search_query
-                and not self._search_loading_more
-                and not self._search_more_exhausted
-                and self.results
-                and self.tabs.get() == "Download"
-            ):
-                canvas = self.results_frame._parent_canvas  # noqa: SLF001
-                top, bottom = canvas.yview()
-                # `bottom == 1.0` means there's nothing to scroll; only trigger
-                # when the user has actually scrolled past the threshold AND
-                # the content is overflowing.
-                content_overflows = (bottom - top) < 0.999
-                if content_overflows and bottom >= 0.95:
-                    self._load_more_results()
+            if self.tabs.get() == "Download":
+                if (
+                    self._search_query
+                    and not self._search_loading_more
+                    and not self._search_more_exhausted
+                    and self.results
+                ):
+                    canvas = self.results_frame._parent_canvas  # noqa: SLF001
+                    top, bottom = canvas.yview()
+                    content_overflows = (bottom - top) < 0.999
+                    if content_overflows and bottom >= 0.95:
+                        self._load_more_results()
+            elif self.tabs.get() == "Music":
+                if (
+                    self._music_search_query
+                    and not self._music_search_loading_more
+                    and not self._music_search_more_exhausted
+                    and self.music_results
+                ):
+                    canvas = self.music_results_frame._parent_canvas  # noqa: SLF001
+                    top, bottom = canvas.yview()
+                    content_overflows = (bottom - top) < 0.999
+                    if content_overflows and bottom >= 0.95:
+                        self._music_load_more_results()
         except (AttributeError, ValueError):
             pass
         self.after(400, self._poll_scroll_bottom)
@@ -883,6 +1219,28 @@ class App(ctk.CTk):
             audio_only=self._search_audio_only,
         )
 
+    def _music_load_more_results(self) -> None:
+        if not self._music_search_query or self._music_search_loading_more:
+            return
+        self._music_search_loading_more = True
+        already_loaded = len(self.music_results)
+        new_limit = already_loaded + self._music_search_page_size
+        cookies = self.settings.get("cookies_path") or None
+        self._music_show_loading_indicator(
+            f"Loading more results ({already_loaded} → {new_limit})...",
+        )
+        self.jobs.enqueue(
+            kind="search_more",
+            label=f"Music load more: {self._music_search_query[:50]}",
+            query=self._music_search_query,
+            limit=new_limit,
+            already_loaded=already_loaded,
+            cookies_path=cookies,
+            videos_only=True,
+            audio_only=True,
+            results_context="music",
+        )
+
     def _show_loading_indicator(self, text: str) -> None:
         self._clear_loading_indicator()
         self._loading_more_label = ctk.CTkLabel(
@@ -900,11 +1258,38 @@ class App(ctk.CTk):
                 pass
             self._loading_more_label = None
 
+    def _music_show_loading_indicator(self, text: str) -> None:
+        self._music_clear_loading_indicator()
+        self._music_loading_more_label = ctk.CTkLabel(
+            self.music_results_frame, text=text,
+            text_color=("gray40", "gray70"),
+        )
+        self._music_loading_more_label.pack(fill="x", padx=8, pady=8)
+        self._bind_results_mousewheel(self._music_loading_more_label)
+
+    def _music_clear_loading_indicator(self) -> None:
+        if self._music_loading_more_label is not None:
+            try:
+                self._music_loading_more_label.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+            self._music_loading_more_label = None
+
     def _append_more_results(self, new_items: list[SearchResult]) -> None:
         for r in new_items:
             self.results.append(r)
             self._result_rows.append(_ResultRow(self.results_frame, r, self))
         self.results_header_label.configure(text=f"Results ({len(self.results)})")
+
+    def _music_append_more_results(self, new_items: list[SearchResult]) -> None:
+        for r in new_items:
+            self.music_results.append(r)
+            self._music_result_rows.append(
+                _ResultRow(self.music_results_frame, r, self, mode="music"),
+            )
+        self.music_results_header_label.configure(
+            text=f"Results ({len(self.music_results)})",
+        )
 
     # ====================== Job listener ===================================
 
@@ -934,12 +1319,23 @@ class App(ctk.CTk):
             # In-line search progress in the Results header so the user
             # has visible feedback without watching the bottom panel.
             # search_more updates the dedicated bottom indicator instead.
+            ctx = job.params.get("results_context", "download")
             if job.kind == "search":
-                self.results_header_label.configure(
+                hdr = (
+                    self.music_results_header_label
+                    if ctx == "music"
+                    else self.results_header_label
+                )
+                hdr.configure(
                     text=f"Results — searching: {_truncate(job.progress_msg or '...', 60)}"
                 )
             elif job.kind == "resolve":
-                self.results_header_label.configure(
+                hdr = (
+                    self.music_results_header_label
+                    if ctx == "music"
+                    else self.results_header_label
+                )
+                hdr.configure(
                     text=f"Results — resolving: {_truncate(job.progress_msg or '...', 60)}"
                 )
         else:
@@ -950,43 +1346,73 @@ class App(ctk.CTk):
 
             # Search / resolve completion: replace results list.
             if job.kind in ("search", "resolve"):
+                ctx = job.params.get("results_context", "download")
                 if job.state == DONE and isinstance(job.result, list):
-                    self.results = list(job.result)
-                    self._render_results()  # also rewrites header to "Results (N)"
+                    if ctx == "music":
+                        self.music_results = list(job.result)
+                        self._music_render_results()
+                    else:
+                        self.results = list(job.result)
+                        self._render_results()
                     self._set_status(
-                        f"{job.kind.capitalize()} returned {len(self.results)} result(s)."
+                        f"{job.kind.capitalize()} returned {len(job.result)} result(s)."
                     )
                     if job.kind == "search":
-                        # Now that the new results are on screen, enable
-                        # infinite scroll for this query.
-                        self._search_query = self._pending_search_query
-                        self._pending_search_query = None
+                        if ctx == "music":
+                            self._music_search_query = self._music_pending_search_query
+                            self._music_pending_search_query = None
+                        else:
+                            self._search_query = self._pending_search_query
+                            self._pending_search_query = None
+                    elif ctx == "music":
+                        self._music_search_query = None
                     else:
-                        # Playlists are finite — no infinite scroll.
                         self._search_query = None
                 elif job.state == FAILED:
-                    self.results_header_label.configure(
-                        text=f"Results — {job.kind} failed"
+                    hdr = (
+                        self.music_results_header_label
+                        if ctx == "music"
+                        else self.results_header_label
                     )
+                    hdr.configure(text=f"Results — {job.kind} failed")
                     self._set_status(f"{job.kind.capitalize()} failed: {job.error}")
                 elif job.state == CANCELLED:
-                    self.results_header_label.configure(
-                        text=f"Results — {job.kind} cancelled"
+                    hdr = (
+                        self.music_results_header_label
+                        if ctx == "music"
+                        else self.results_header_label
                     )
+                    hdr.configure(text=f"Results — {job.kind} cancelled")
                     self._set_status(f"{job.kind.capitalize()} cancelled.")
 
             # "Load more" completion: append only the new tail of results.
             elif job.kind == "search_more":
-                self._search_loading_more = False
-                self._clear_loading_indicator()
+                ctx = job.params.get("results_context", "download")
+                if ctx == "music":
+                    self._music_search_loading_more = False
+                    self._music_clear_loading_indicator()
+                else:
+                    self._search_loading_more = False
+                    self._clear_loading_indicator()
                 if job.state == DONE and isinstance(job.result, list):
                     already = int(job.params.get("already_loaded", 0))
                     new_items = job.result[already:]
                     if new_items:
-                        self._append_more_results(new_items)
-                        self._set_status(
-                            f"Loaded {len(new_items)} more (total {len(self.results)})."
-                        )
+                        if ctx == "music":
+                            self._music_append_more_results(new_items)
+                            self._set_status(
+                                f"Loaded {len(new_items)} more "
+                                f"(total {len(self.music_results)}).",
+                            )
+                        else:
+                            self._append_more_results(new_items)
+                            self._set_status(
+                                f"Loaded {len(new_items)} more "
+                                f"(total {len(self.results)}).",
+                            )
+                    elif ctx == "music":
+                        self._music_search_more_exhausted = True
+                        self._set_status("No more results.")
                     else:
                         self._search_more_exhausted = True
                         self._set_status("No more results.")
@@ -1038,7 +1464,12 @@ class App(ctk.CTk):
 
         # Collect the inner canvases that we want to scroll on wheel/touchpad.
         self._scroll_canvases: list = []
-        for frame in (self.results_frame, self.active_frame, self.recent_frame):
+        for frame in (
+            self.results_frame,
+            self.music_results_frame,
+            self.active_frame,
+            self.recent_frame,
+        ):
             try:
                 self._scroll_canvases.append(frame._parent_canvas)  # noqa: SLF001
             except AttributeError:
@@ -1249,12 +1680,28 @@ class App(ctk.CTk):
 class _ResultRow:
     """One row in the results list: thumbnail | title+meta | Download / 📁."""
 
-    def __init__(self, parent, result: SearchResult, app: "App") -> None:
+    def __init__(
+        self,
+        parent,
+        result: SearchResult,
+        app: "App",
+        *,
+        mode: str = "download",
+    ) -> None:
         self.result = result
         self.app = app
         self._alive = True
         self.frame = ctk.CTkFrame(parent)
         self.frame.pack(fill="x", padx=4, pady=3)
+
+        if mode == "music":
+            download_fn = lambda: app._music_download_one(result, override=False)
+            folder_fn = lambda: app._music_download_one(result, override=True)
+            btn_text = "Download"
+        else:
+            download_fn = lambda: app._download_one(result, override=False)
+            folder_fn = lambda: app._download_one(result, override=True)
+            btn_text = "Download"
 
         # Thumbnail (left).
         self._ctk_image = ctk.CTkImage(
@@ -1287,13 +1734,9 @@ class _ResultRow:
         btn_col = ctk.CTkFrame(self.frame, fg_color="transparent")
         btn_col.pack(side="right", padx=6, pady=4)
         ctk.CTkButton(btn_col, text="📁", width=44,
-                      command=lambda: app._download_one(result, override=True)).pack(
-            side="right", padx=2,
-        )
-        ctk.CTkButton(btn_col, text="Download", width=110,
-                      command=lambda: app._download_one(result, override=False)).pack(
-            side="right", padx=2,
-        )
+                      command=folder_fn).pack(side="right", padx=2)
+        ctk.CTkButton(btn_col, text=btn_text, width=110,
+                      command=download_fn).pack(side="right", padx=2)
 
         # Forward mouse-wheel events from every child widget up to the
         # scrollable frame's canvas — otherwise the wheel does nothing once
