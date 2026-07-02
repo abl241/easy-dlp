@@ -33,6 +33,8 @@ from .jobs import CANCELLED, DONE, FAILED, Job, JobQueue, QUEUED, RUNNING
 from .runtime import find_ffmpeg
 from .search import SearchResult, is_url, resolve_urls
 from .settings import Settings, _config_dir
+from .sources import PLATFORM_CONFIGS, MusicTrack, detect_platform, platform_config
+from .sources.base import MATCH_PENDING
 
 _THUMB_SIZE = (120, 68)  # 16:9 thumbnail
 
@@ -163,7 +165,12 @@ class App(ctk.CTk):
 
         # Music tab state (separate from Download tab results).
         self.music_results: list[SearchResult] = []
+        self.music_tracks: list[MusicTrack] = []
+        self._music_showing_tracks = False
+        self._music_auto_download = False
+        self._music_pending_out_dir: str | None = None
         self._music_result_rows: list[_ResultRow] = []
+        self._music_track_rows: list["_MusicTrackRow"] = []
         self._music_search_query: str | None = None
         self._music_pending_search_query: str | None = None
         self._music_search_loading_more: bool = False
@@ -416,13 +423,13 @@ class App(ctk.CTk):
             command=lambda: self.tabs.set("Settings"),
         ).pack(side="right", padx=10, pady=6)
 
-        self.music_source_tabs = ctk.CTkTabview(parent, height=140)
+        self.music_source_tabs = ctk.CTkTabview(parent, height=170)
         self.music_source_tabs.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
         self._build_music_search_subtab(self.music_source_tabs.add("Search YouTube"))
-        self._build_music_paste_subtab(self.music_source_tabs.add("Paste URLs"))
+        self._build_music_paste_subtab(self.music_source_tabs.add("Paste Link"))
         last = self.settings.get("music_source_tab") or "search"
         self.music_source_tabs.set(
-            "Search YouTube" if last == "search" else "Paste URLs",
+            "Search YouTube" if last == "search" else "Paste Link",
         )
 
         res_outer = ctk.CTkFrame(parent)
@@ -437,6 +444,12 @@ class App(ctk.CTk):
             anchor="w", font=ctk.CTkFont(weight="bold"),
         )
         self.music_results_header_label.pack(side="left", padx=4)
+        self.music_match_btn = ctk.CTkButton(
+            header, text="Match on YouTube", width=150,
+            command=self._music_match_all,
+        )
+        self.music_match_btn.pack(side="right", padx=2)
+        self.music_match_btn.pack_forget()
         ctk.CTkButton(header, text="Clear", width=70,
                       command=self._music_clear_results).pack(side="right", padx=2)
         ctk.CTkButton(header, text="📁", width=44,
@@ -503,15 +516,43 @@ class App(ctk.CTk):
         hint.pack(fill="x", padx=12, pady=(4, 4))
 
     def _build_music_paste_subtab(self, parent) -> None:
-        ctk.CTkLabel(
-            parent,
-            text="Paste one URL per line. Playlists expand into individual tracks.",
-            anchor="w",
-        ).pack(fill="x", padx=10, pady=(8, 2))
+        top = ctk.CTkFrame(parent, fg_color="transparent")
+        top.pack(fill="x", padx=10, pady=(8, 2))
+
+        ctk.CTkLabel(top, text="Source:", width=60, anchor="w").pack(side="left")
+        platform = self.settings.get("music_paste_platform") or "youtube"
+        if platform not in PLATFORM_CONFIGS:
+            platform = "youtube"
+        self.music_platform_var = ctk.StringVar(value=PLATFORM_CONFIGS[platform].label)
+        self.music_platform_menu = ctk.CTkOptionMenu(
+            top,
+            values=[PLATFORM_CONFIGS[pid].label for pid in PLATFORM_CONFIGS],
+            variable=self.music_platform_var,
+            width=140,
+            command=self._on_music_platform_change,
+        )
+        self.music_platform_menu.pack(side="left", padx=(0, 8))
+
+        self.music_paste_hint_label = ctk.CTkLabel(
+            top, text="", anchor="w", text_color=("gray40", "gray70"),
+        )
+        self.music_paste_hint_label.pack(side="left", fill="x", expand=True)
 
         self.music_paste_box = ctk.CTkTextbox(parent, height=55)
         self.music_paste_box.pack(fill="x", padx=10, pady=4)
         self.music_paste_box.insert("1.0", self.settings.get("music_paste_urls") or "")
+
+        self.music_track_list_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        ctk.CTkLabel(
+            self.music_track_list_frame,
+            text="Or paste a track list (Artist - Title per line):",
+            anchor="w", text_color=("gray40", "gray70"),
+        ).pack(fill="x", pady=(0, 2))
+        self.music_track_list_box = ctk.CTkTextbox(self.music_track_list_frame, height=45)
+        self.music_track_list_box.pack(fill="x")
+        self.music_track_list_box.insert(
+            "1.0", self.settings.get("music_track_list") or "",
+        )
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
         btn_row.pack(fill="x", padx=10, pady=(2, 8))
@@ -525,6 +566,27 @@ class App(ctk.CTk):
                       command=lambda: self._music_paste_download_all(override=True)).pack(
             side="left", padx=2,
         )
+
+        self._apply_music_platform_ui()
+
+    def _music_platform_id(self) -> str:
+        label = self.music_platform_var.get()
+        for pid, cfg in PLATFORM_CONFIGS.items():
+            if cfg.label == label:
+                return pid
+        return "youtube"
+
+    def _on_music_platform_change(self, _value: str = "") -> None:
+        self.settings.set("music_paste_platform", self._music_platform_id())
+        self._apply_music_platform_ui()
+
+    def _apply_music_platform_ui(self) -> None:
+        cfg = platform_config(self._music_platform_id())
+        self.music_paste_hint_label.configure(text=cfg.hint)
+        if cfg.supports_text_fallback:
+            self.music_track_list_frame.pack(fill="x", padx=10, pady=(0, 4))
+        else:
+            self.music_track_list_frame.pack_forget()
 
     # ------------------------- Embed tab ------------------------------------
 
@@ -933,9 +995,23 @@ class App(ctk.CTk):
         out_dir: str,
         cookies: str | None,
         result: SearchResult | None = None,
+        track: MusicTrack | None = None,
     ) -> None:
         params = self._music_job_params()
-        if result is not None:
+        if track is not None:
+            params["expected_artist"] = track.artist
+            params["expected_title"] = track.title
+            params["expected_duration_s"] = track.duration_s
+            params["source_url"] = track.source_url or url
+            params["source_title"] = track.title
+            params["source_uploader"] = track.artist
+            params["source_duration_s"] = track.duration_s
+            params["source_thumbnail_url"] = track.cover_url or track.thumbnail_url
+            params["source_album"] = track.album
+            params["source_track_number"] = track.track_number
+            params["source_disc_number"] = track.disc_number
+            params["source_cover_url"] = track.cover_url
+        elif result is not None:
             params["source_url"] = result.url
             params["source_title"] = result.title
             params["source_uploader"] = result.uploader
@@ -1003,6 +1079,8 @@ class App(ctk.CTk):
         self._music_search_page_size = max(10, limit)
         self._music_pending_search_query = query if not is_url(query) else None
         self._music_search_audio_only = bool(self.music_search_audio_only_var.get())
+        self.music_tracks = []
+        self._music_showing_tracks = False
         label = f"Music search: {query[:60]}"
         self.jobs.enqueue(
             kind="search", label=label,
@@ -1029,16 +1107,51 @@ class App(ctk.CTk):
 
     def _music_do_resolve(self) -> None:
         text = self.music_paste_box.get("1.0", "end").strip()
+        track_text = self.music_track_list_box.get("1.0", "end").strip()
         self.settings.set("music_paste_urls", text)
+        self.settings.set("music_track_list", track_text)
         self.settings.set("music_source_tab", "paste")
-        urls = [u for u in text.splitlines() if u.strip() and is_url(u.strip())]
-        if not urls:
-            self._set_status("Paste one or more YouTube URLs first.")
+        platform = self._music_platform_id()
+        self.settings.set("music_paste_platform", platform)
+        self._music_auto_download = False
+
+        urls = [u.strip() for u in text.splitlines() if u.strip() and is_url(u.strip())]
+        if not urls and not track_text.strip():
+            self._set_status("Paste one or more URLs, or a track list.")
             return
+
+        if urls:
+            detected = detect_platform(urls[0])
+            if detected and detected != platform:
+                cfg = platform_config(detected)
+                if messagebox.askyesno(
+                    "Switch source?",
+                    f"This looks like a {cfg.label} link.\n\n"
+                    f"Switch source to {cfg.label}?",
+                ):
+                    platform = detected
+                    self.music_platform_var.set(cfg.label)
+                    self.settings.set("music_paste_platform", platform)
+                    self._apply_music_platform_ui()
+
         cookies = self.settings.get("cookies_path") or None
+        cfg = platform_config(platform)
+
+        if platform == "youtube" and urls:
+            self.jobs.enqueue(
+                kind="resolve", label=f"Music resolve {len(urls)} URL(s)",
+                urls=urls, cookies_path=cookies,
+                results_context="music",
+            )
+            return
+
         self.jobs.enqueue(
-            kind="resolve", label=f"Music resolve {len(urls)} URL(s)",
-            urls=urls, cookies_path=cookies,
+            kind="source_resolve",
+            label=f"Resolve {cfg.label} ({len(urls) or 'track list'})",
+            platform=platform,
+            urls=urls,
+            text=track_text,
+            cookies_path=cookies,
             results_context="music",
         )
 
@@ -1078,11 +1191,16 @@ class App(ctk.CTk):
 
     def _music_paste_download_all(self, *, override: bool) -> None:
         text = self.music_paste_box.get("1.0", "end").strip()
+        track_text = self.music_track_list_box.get("1.0", "end").strip()
         self.settings.set("music_paste_urls", text)
+        self.settings.set("music_track_list", track_text)
+        platform = self._music_platform_id()
+
         urls = [u.strip() for u in text.splitlines() if u.strip() and is_url(u.strip())]
-        if not urls:
-            self._set_status("Paste one or more YouTube URLs first.")
+        if not urls and not track_text.strip():
+            self._set_status("Paste one or more URLs, or a track list.")
             return
+
         out_override = None
         if override:
             out_override = _pick_folder()
@@ -1095,6 +1213,21 @@ class App(ctk.CTk):
                 "Configure a music output folder in Settings.",
             )
             return
+
+        cfg = platform_config(platform)
+        if cfg.needs_youtube_match:
+            count_hint = len(urls) or "many"
+            if not messagebox.askyesno(
+                "Download playlist",
+                f"This will resolve the {cfg.label} source and search YouTube "
+                f"for each track before downloading.\n\nContinue?",
+            ):
+                return
+            self._music_pending_out_dir = out_dir
+            self._music_auto_download = True
+            self._music_do_resolve()
+            return
+
         cookies = self.settings.get("cookies_path") or None
         if self.music_prefer_audio_var.get():
             for raw_url in urls:
@@ -1195,7 +1328,104 @@ class App(ctk.CTk):
                     cookies_path=cookies,
                 )
 
+    def _music_download_one_track(self, track: MusicTrack, *, override: bool) -> None:
+        if not track.is_downloadable() or not track.youtube_url:
+            self._set_status("Match this track on YouTube first.")
+            return
+        out_override = None
+        if override:
+            out_override = _pick_folder()
+            if not out_override:
+                return
+        out_dir = out_override or self.settings.get("music_dir")
+        if not out_dir:
+            messagebox.showinfo(
+                "Missing output folder",
+                "Configure a music output folder in Settings.",
+            )
+            return
+        cookies = self.settings.get("cookies_path") or None
+        label = f"Music: {_truncate(track.display_title(60), 60)}"
+        self._enqueue_music_download(
+            track.youtube_url, label,
+            out_dir=out_dir, cookies=cookies, track=track,
+        )
+
+    def _music_match_all(self) -> None:
+        if not self.music_tracks:
+            self._set_status("No tracks to match.")
+            return
+        pending = [t for t in self.music_tracks if t.match_status == MATCH_PENDING]
+        if not pending:
+            self._set_status("All tracks are already matched.")
+            return
+        cookies = self.settings.get("cookies_path") or None
+        self._music_auto_download = False
+        self.jobs.enqueue(
+            kind="source_match_all",
+            label=f"Match {len(pending)} track(s) on YouTube",
+            tracks=[t.to_dict() for t in self.music_tracks],
+            cookies_path=cookies,
+            results_context="music",
+        )
+
+    def _music_enqueue_matched_downloads(self, out_dir: str) -> None:
+        cookies = self.settings.get("cookies_path") or None
+        for track in self.music_tracks:
+            if not track.is_downloadable() or not track.youtube_url:
+                continue
+            label = f"Music: {_truncate(track.display_title(60), 60)}"
+            self._enqueue_music_download(
+                track.youtube_url, label,
+                out_dir=out_dir, cookies=cookies, track=track,
+            )
+
     def _music_download_all(self, *, override: bool) -> None:
+        if self._music_showing_tracks:
+            downloadable = [t for t in self.music_tracks if t.is_downloadable()]
+            pending = [t for t in self.music_tracks if t.match_status == MATCH_PENDING]
+            if pending and not downloadable:
+                out_override = None
+                if override:
+                    out_override = _pick_folder()
+                    if not out_override:
+                        return
+                out_dir = out_override or self.settings.get("music_dir")
+                if not out_dir:
+                    messagebox.showinfo(
+                        "Missing output folder",
+                        "Configure a music output folder in Settings.",
+                    )
+                    return
+                self._music_pending_out_dir = out_dir
+                cookies = self.settings.get("cookies_path") or None
+                self.jobs.enqueue(
+                    kind="source_match_all",
+                    label=f"Match {len(pending)} track(s) on YouTube",
+                    tracks=[t.to_dict() for t in self.music_tracks],
+                    cookies_path=cookies,
+                    results_context="music",
+                    auto_download=True,
+                )
+                return
+            if not downloadable:
+                self._set_status("No matched tracks to download.")
+                return
+            out_override = None
+            if override:
+                out_override = _pick_folder()
+                if not out_override:
+                    return
+            out_dir = out_override or self.settings.get("music_dir")
+            if not out_dir:
+                messagebox.showinfo(
+                    "Missing output folder",
+                    "Configure a music output folder in Settings.",
+                )
+                return
+            self._music_enqueue_matched_downloads(out_dir)
+            return
+
         if not self.music_results:
             self._set_status("No results to download.")
             return
@@ -1249,7 +1479,38 @@ class App(ctk.CTk):
         for row in self._music_result_rows:
             row.destroy()
         self._music_result_rows.clear()
+        for row in self._music_track_rows:
+            row.destroy()
+        self._music_track_rows.clear()
 
+        if self._music_showing_tracks:
+            for track in self.music_tracks:
+                self._music_track_rows.append(
+                    _MusicTrackRow(self.music_results_frame, track, self),
+                )
+            matched = sum(1 for t in self.music_tracks if t.is_downloadable())
+            failed = sum(1 for t in self.music_tracks if t.match_status == "failed")
+            pending = sum(1 for t in self.music_tracks if t.match_status == MATCH_PENDING)
+            if self.music_tracks:
+                header = f"Tracks ({len(self.music_tracks)})"
+                if pending:
+                    header += f" — {pending} need YouTube match"
+                elif failed:
+                    header += f" — {matched} matched, {failed} failed"
+                else:
+                    header += f" — {matched} ready"
+                self.music_results_header_label.configure(text=header)
+            else:
+                self.music_results_header_label.configure(
+                    text="Results (0) — search or paste a link above",
+                )
+            if pending:
+                self.music_match_btn.pack(side="right", padx=2)
+            else:
+                self.music_match_btn.pack_forget()
+            return
+
+        self.music_match_btn.pack_forget()
         for r in self.music_results:
             self._music_result_rows.append(
                 _ResultRow(self.music_results_frame, r, self, mode="music"),
@@ -1261,11 +1522,15 @@ class App(ctk.CTk):
             )
         else:
             self.music_results_header_label.configure(
-                text="Results (0) — search or paste a URL above",
+                text="Results (0) — search or paste a link above",
             )
 
     def _music_clear_results(self) -> None:
         self.music_results = []
+        self.music_tracks = []
+        self._music_showing_tracks = False
+        self._music_auto_download = False
+        self._music_pending_out_dir = None
         self._music_search_query = None
         self._music_search_loading_more = False
         self._music_search_more_exhausted = False
@@ -1390,6 +1655,8 @@ class App(ctk.CTk):
         self.results_header_label.configure(text=f"Results ({len(self.results)})")
 
     def _music_append_more_results(self, new_items: list[SearchResult]) -> None:
+        self._music_showing_tracks = False
+        self.music_tracks = []
         for r in new_items:
             self.music_results.append(r)
             self._music_result_rows.append(
@@ -1437,14 +1704,19 @@ class App(ctk.CTk):
                 hdr.configure(
                     text=f"Results — searching: {_truncate(job.progress_msg or '...', 60)}"
                 )
-            elif job.kind == "resolve":
+            elif job.kind in ("resolve", "source_resolve", "source_match_all"):
                 hdr = (
                     self.music_results_header_label
                     if ctx == "music"
                     else self.results_header_label
                 )
+                verb = {
+                    "resolve": "resolving",
+                    "source_resolve": "resolving",
+                    "source_match_all": "matching",
+                }.get(job.kind, "working")
                 hdr.configure(
-                    text=f"Results — resolving: {_truncate(job.progress_msg or '...', 60)}"
+                    text=f"Results — {verb}: {_truncate(job.progress_msg or '...', 60)}"
                 )
         else:
             # Job is terminal — remove from active, add to recent (unless it was a search/resolve)
@@ -1458,6 +1730,8 @@ class App(ctk.CTk):
                 if job.state == DONE and isinstance(job.result, list):
                     if ctx == "music":
                         self.music_results = list(job.result)
+                        self.music_tracks = []
+                        self._music_showing_tracks = False
                         self._music_render_results()
                     else:
                         self.results = list(job.result)
@@ -1492,6 +1766,77 @@ class App(ctk.CTk):
                     )
                     hdr.configure(text=f"Results — {job.kind} cancelled")
                     self._set_status(f"{job.kind.capitalize()} cancelled.")
+
+            elif job.kind == "source_resolve":
+                ctx = job.params.get("results_context", "download")
+                if ctx != "music":
+                    pass
+                elif job.state == DONE and isinstance(job.result, list):
+                    from .sources.base import MusicTrack
+
+                    self.music_tracks = [
+                        t if isinstance(t, MusicTrack) else MusicTrack.from_dict(t)
+                        for t in job.result
+                    ]
+                    self.music_results = []
+                    self._music_showing_tracks = True
+                    self._music_search_query = None
+                    self._music_render_results()
+                    self._set_status(
+                        f"Resolved {len(self.music_tracks)} track(s).",
+                    )
+                    if self._music_auto_download and self.music_tracks:
+                        cookies = self.settings.get("cookies_path") or None
+                        self.jobs.enqueue(
+                            kind="source_match_all",
+                            label=f"Match {len(self.music_tracks)} track(s) on YouTube",
+                            tracks=[t.to_dict() for t in self.music_tracks],
+                            cookies_path=cookies,
+                            results_context="music",
+                            auto_download=True,
+                        )
+                elif job.state == FAILED:
+                    self._music_auto_download = False
+                    self._music_pending_out_dir = None
+                    self.music_results_header_label.configure(
+                        text="Results — resolve failed",
+                    )
+                    self._set_status(f"Resolve failed: {job.error}")
+                elif job.state == CANCELLED:
+                    self._music_auto_download = False
+                    self._music_pending_out_dir = None
+
+            elif job.kind == "source_match_all":
+                ctx = job.params.get("results_context", "download")
+                if ctx != "music":
+                    pass
+                elif job.state == DONE and isinstance(job.result, list):
+                    from .sources.base import MusicTrack
+
+                    self.music_tracks = [
+                        t if isinstance(t, MusicTrack) else MusicTrack.from_dict(t)
+                        for t in job.result
+                    ]
+                    self._music_showing_tracks = True
+                    self._music_render_results()
+                    matched = sum(1 for t in self.music_tracks if t.is_downloadable())
+                    self._set_status(
+                        f"Matched {matched}/{len(self.music_tracks)} track(s) on YouTube.",
+                    )
+                    if job.params.get("auto_download") and self._music_pending_out_dir:
+                        self._music_enqueue_matched_downloads(self._music_pending_out_dir)
+                        self._music_auto_download = False
+                        self._music_pending_out_dir = None
+                elif job.state == FAILED:
+                    self._music_auto_download = False
+                    self._music_pending_out_dir = None
+                    self.music_results_header_label.configure(
+                        text="Results — match failed",
+                    )
+                    self._set_status(f"Match failed: {job.error}")
+                elif job.state == CANCELLED:
+                    self._music_auto_download = False
+                    self._music_pending_out_dir = None
 
             # "Load more" completion: append only the new tail of results.
             elif job.kind == "search_more":
@@ -1861,6 +2206,100 @@ class App(ctk.CTk):
 # ============================================================================
 # Sub-widgets: ResultRow, ActiveRow, RecentRow
 # ============================================================================
+
+class _MusicTrackRow:
+    """One row for an imported track (Spotify, etc.) before/after YouTube match."""
+
+    def __init__(self, parent, track: MusicTrack, app: "App") -> None:
+        self.track = track
+        self.app = app
+        self._alive = True
+        self.frame = ctk.CTkFrame(parent)
+        self.frame.pack(fill="x", padx=4, pady=3)
+
+        thumb_url = track.cover_url or track.thumbnail_url
+        self._ctk_image = ctk.CTkImage(
+            light_image=thumbcache.placeholder(_THUMB_SIZE),
+            dark_image=thumbcache.placeholder(_THUMB_SIZE),
+            size=_THUMB_SIZE,
+        )
+        self.thumb_label = ctk.CTkLabel(
+            self.frame, text="", image=self._ctk_image,
+            width=_THUMB_SIZE[0], height=_THUMB_SIZE[1],
+        )
+        self.thumb_label.pack(side="left", padx=(6, 8), pady=6)
+
+        text_col = ctk.CTkFrame(self.frame, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True, padx=2, pady=6)
+        ctk.CTkLabel(
+            text_col, text=track.display_title(),
+            anchor="w", font=ctk.CTkFont(weight="bold"),
+            wraplength=500, justify="left",
+        ).pack(fill="x")
+        meta = track.metadata_line()
+        if meta:
+            color = ("gray40", "gray70")
+            if track.match_status == "failed":
+                color = ("#a33", "#f66")
+            ctk.CTkLabel(
+                text_col, text=meta, anchor="w", text_color=color,
+            ).pack(fill="x")
+
+        btn_col = ctk.CTkFrame(self.frame, fg_color="transparent")
+        btn_col.pack(side="right", padx=6, pady=4)
+
+        if track.is_downloadable():
+            ctk.CTkButton(
+                btn_col, text="📁", width=44,
+                command=lambda: app._music_download_one_track(track, override=True),
+            ).pack(side="right", padx=2)
+            ctk.CTkButton(
+                btn_col, text="Download", width=110,
+                command=lambda: app._music_download_one_track(track, override=False),
+            ).pack(side="right", padx=2)
+        elif track.match_status == MATCH_PENDING:
+            ctk.CTkLabel(
+                btn_col, text="Match first", text_color=("gray40", "gray70"),
+            ).pack(side="right", padx=8)
+        else:
+            ctk.CTkButton(
+                btn_col, text="Retry", width=80,
+                command=app._music_match_all,
+            ).pack(side="right", padx=2)
+
+        app._bind_results_mousewheel(self.frame)
+        if thumb_url:
+            self._kick_off_thumb_fetch(thumb_url)
+
+    def _kick_off_thumb_fetch(self, url: str) -> None:
+        def _on_loaded(img) -> None:
+            if not self._alive:
+                return
+            try:
+                self.app.after(0, lambda: self._apply_thumb(img))
+            except Exception:  # noqa: BLE001
+                pass
+
+        thumbcache.load(url, _on_loaded)
+
+    def _apply_thumb(self, img) -> None:
+        if not self._alive or img is None:
+            return
+        try:
+            resized = img.resize(_THUMB_SIZE)
+            self._ctk_image.configure(
+                light_image=resized, dark_image=resized, size=_THUMB_SIZE,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def destroy(self) -> None:
+        self._alive = False
+        try:
+            self.frame.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+
 
 class _ResultRow:
     """One row in the results list: thumbnail | title+meta | Download / 📁."""

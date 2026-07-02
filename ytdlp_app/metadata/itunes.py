@@ -38,6 +38,7 @@ def search_track(
     title: str,
     *,
     duration_s: int | None = None,
+    album: str = "",
     limit: int = 25,
 ) -> ITunesTrack | None:
     """Return the best iTunes catalog match for a track, or None."""
@@ -52,11 +53,13 @@ def search_track(
     if artist:
         artist_id = _lookup_artist_id(artist)
         if artist_id is not None:
-            match = _search_artist_catalog(artist_id, title, duration_s)
+            match = _search_artist_catalog(
+                artist_id, title, duration_s, album=album,
+            )
             if match is not None:
                 return match
 
-    return _search_songs(artist, title, duration_s=duration_s, limit=limit)
+    return _search_songs(artist, title, duration_s=duration_s, album=album, limit=limit)
 
 
 def fetch_artwork(url: str | None, *, size: int = 600) -> bytes | None:
@@ -111,6 +114,8 @@ def _search_artist_catalog(
     artist_id: int,
     title: str,
     duration_s: int | None,
+    *,
+    album: str = "",
 ) -> ITunesTrack | None:
     """Find a song within a known artist's iTunes catalog."""
     params = urllib.parse.urlencode({
@@ -130,7 +135,7 @@ def _search_artist_catalog(
         candidate = _row_to_track(row)
         if candidate is None:
             continue
-        score = _score_title_match(candidate, title, duration_s)
+        score = _score_title_match(candidate, title, duration_s, album=album)
         if score > best_score:
             best_score = score
             best = candidate
@@ -145,6 +150,7 @@ def _search_songs(
     title: str,
     *,
     duration_s: int | None,
+    album: str = "",
     limit: int,
 ) -> ITunesTrack | None:
     """Fallback: broad song search with strict artist matching."""
@@ -166,7 +172,7 @@ def _search_songs(
         candidate = _row_to_track(row)
         if candidate is None:
             continue
-        score = _score_match(candidate, artist, title, duration_s)
+        score = _score_match(candidate, artist, title, duration_s, album=album)
         if score > best_score:
             best_score = score
             best = candidate
@@ -306,16 +312,31 @@ def _version_penalty(title: str) -> float:
     return 0.0
 
 
+def _album_bonus(album: str, candidate_album: str) -> float:
+    album = (album or "").strip()
+    if not album or not candidate_album:
+        return 0.0
+    overlap = _token_overlap(album, candidate_album)
+    if overlap >= 0.85:
+        return 0.15
+    if overlap >= 0.6:
+        return 0.08
+    return 0.0
+
+
 def _score_title_match(
     candidate: ITunesTrack,
     title: str,
     duration_s: int | None,
+    *,
+    album: str = "",
 ) -> float:
     """Score a candidate when the artist is already confirmed."""
     title_score = _token_overlap(candidate.title, title)
     if title_score < 0.5:
         return 0.0
     score = title_score * 0.70 + _duration_bonus(duration_s, candidate.duration_ms)
+    score += _album_bonus(album, candidate.album)
     score -= _version_penalty(candidate.title)
     return max(0.0, min(1.0, score))
 
@@ -325,6 +346,8 @@ def _score_match(
     artist: str,
     title: str,
     duration_s: int | None,
+    *,
+    album: str = "",
 ) -> float:
     title_score = _token_overlap(candidate.title, title)
     artist_score = _artist_similarity(candidate.artist, artist) if artist else 0.0
@@ -339,5 +362,6 @@ def _score_match(
         score = title_score * 0.65
 
     score += _duration_bonus(duration_s, candidate.duration_ms)
+    score += _album_bonus(album, candidate.album)
     score -= _version_penalty(candidate.title)
     return max(0.0, min(1.0, score))

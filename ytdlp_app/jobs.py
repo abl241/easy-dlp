@@ -271,6 +271,9 @@ class JobQueue:
                     cookies_path=cookies,
                     cancel_event=job.cancel_event,
                     progress=log,
+                    expected_artist=params.get("expected_artist"),
+                    expected_title=params.get("expected_title"),
+                    expected_duration_s=params.get("expected_duration_s"),
                 )
 
             result = dl.download_music(
@@ -300,6 +303,10 @@ class JobQueue:
                         duration_s=info.duration_s if info else None,
                         thumbnail_url=info.thumbnail_url if info else None,
                         itunes_match=info.itunes_match if info else None,
+                        source_album=params.get("source_album") or "",
+                        source_track_number=params.get("source_track_number"),
+                        source_disc_number=params.get("source_disc_number"),
+                        source_cover_url=params.get("source_cover_url"),
                     )
                     pp = mp.process_track(
                         path,
@@ -361,6 +368,48 @@ class JobQueue:
                 progress=log,
             )
             job.result = results
+
+        elif job.kind == "source_resolve":
+            from .sources import resolve as resolve_source
+            tracks = resolve_source(
+                params["platform"],
+                params.get("urls") or [],
+                text=params.get("text") or "",
+                progress=log,
+                cancel_event=job.cancel_event,
+                cookies_path=cookies,
+            )
+            job.result = tracks
+
+        elif job.kind == "source_match_all":
+            from . import search as se
+            from .sources.base import MATCH_PENDING, MusicTrack
+
+            raw_tracks = params.get("tracks") or []
+            tracks = [
+                t if isinstance(t, MusicTrack) else MusicTrack.from_dict(t)
+                for t in raw_tracks
+            ]
+            total = len(tracks)
+            matched: list[MusicTrack] = []
+            for i, track in enumerate(tracks):
+                if job.cancel_event.is_set():
+                    raise _Cancelled()
+                if track.match_status != MATCH_PENDING:
+                    matched.append(track)
+                    continue
+                label = track.display_title(50)
+                log(f"Matching {i + 1}/{total}: {label}")
+                result = se.find_youtube_match_for_track(
+                    track.artist,
+                    track.title,
+                    track.duration_s,
+                    cookies_path=cookies,
+                    cancel_event=job.cancel_event,
+                    progress=log,
+                )
+                matched.append(track.with_match(result))
+            job.result = matched
 
         else:
             raise ValueError(f"Unknown job kind: {job.kind}")

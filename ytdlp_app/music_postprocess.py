@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +27,10 @@ class TrackInfo:
     duration_s: int | None = None
     thumbnail_url: str | None = None
     itunes_match: ITunesTrack | None = None
+    source_album: str = ""
+    source_track_number: int | None = None
+    source_disc_number: int | None = None
+    source_cover_url: str | None = None
 
 
 @dataclass
@@ -77,6 +81,7 @@ def process_track(
             itunes_match = search_track(
                 parsed.artist, parsed.title,
                 duration_s=duration_s,
+                album=info.source_album,
             )
         else:
             progress("[music] applying metadata…")
@@ -120,9 +125,30 @@ def process_track(
     try:
         if itunes_match:
             if not artwork:
-                artwork = _fetch_url(info.thumbnail_url)
+                artwork = _fetch_url(info.thumbnail_url or info.source_cover_url)
             apply_itunes_tags(
-                file_path, itunes_match,
+                file_path, _merge_source_metadata(itunes_match, info),
+                artwork=artwork,
+                lyrics_plain=lyrics_plain,
+            )
+        elif enrich_metadata and (
+            info.source_album or info.source_track_number is not None
+        ):
+            if not artwork:
+                artwork = _fetch_url(info.thumbnail_url or info.source_cover_url)
+            apply_itunes_tags(
+                file_path,
+                ITunesTrack(
+                    artist=tag_artist or parsed.artist,
+                    title=tag_title or parsed.title,
+                    album=info.source_album,
+                    year=None,
+                    genre=None,
+                    track_number=info.source_track_number,
+                    disc_number=info.source_disc_number,
+                    duration_ms=(duration_s * 1000) if duration_s else None,
+                    artwork_url=None,
+                ),
                 artwork=artwork,
                 lyrics_plain=lyrics_plain,
             )
@@ -147,6 +173,29 @@ def process_track(
         metadata_source=metadata_source,
         lyrics_embedded=bool(lyrics_plain),
         final_path=str(file_path),
+    )
+
+
+def _merge_source_metadata(match: ITunesTrack, info: TrackInfo) -> ITunesTrack:
+    """Prefer playlist/album source fields over per-song iTunes guesses."""
+    album = info.source_album or match.album
+    track_number = (
+        info.source_track_number
+        if info.source_track_number is not None
+        else match.track_number
+    )
+    disc_number = (
+        info.source_disc_number
+        if info.source_disc_number is not None
+        else match.disc_number
+    )
+    if album == match.album and track_number == match.track_number and disc_number == match.disc_number:
+        return match
+    return replace(
+        match,
+        album=album,
+        track_number=track_number,
+        disc_number=disc_number,
     )
 
 

@@ -45,6 +45,8 @@ _DEFAULTS: dict[str, Any] = {
     "music_dir": str(Path.home() / "Music"),
     "music_search_query": "",
     "music_paste_urls": "",
+    "music_paste_platform": "youtube",
+    "music_track_list": "",
     "music_source_tab": "search",    # "search" or "paste"
     "music_search_limit": 20,        # 10 | 20 | 50
     "music_download_lyrics": True,
