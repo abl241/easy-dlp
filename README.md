@@ -283,7 +283,7 @@ A purpose-built workflow for building a proper music library — not just raw do
 <p align="center">
   <img src="docs/screenshots/03-music-tab.png" alt="Music tab" width="900" />
 </p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/03-music-tab.png</code> — Music tab with search, Prefer audio, and Download lyrics toggles</em></p>
+<p align="center"><em>↑ Screenshot: <code>docs/screenshots/03-music-tab.png</code> — Music tab with search, Prefer audio, Download lyrics, and Apple Music toggles</em></p>
 
 <br>
 
@@ -317,6 +317,25 @@ When enabled, easy-dlp searches YouTube for an **official-audio upload** or **To
 ### Audio-only search filter
 
 An optional filter hides music videos and live performances from Music search results, surfacing uploads that are already audio-first.
+
+### Alternate YouTube match
+
+Every search result and every matched Spotify/imported track has a **Change** button. Click it to run a fresh YouTube search for that song and pick a different upload — useful when the first match is a music video, a live version, or the wrong recording. The picker excludes the current video and lets you edit the search query before re-searching.
+
+### Add to Apple Music (macOS)
+
+Two optional checkboxes on the Music tab integrate with the **Music** app after tagging:
+
+| Checkbox | What it does |
+|:---|:---|
+| **Add to Apple Music** | Imports the finished MP3 into your Music library via AppleScript (falls back to the **Automatically Add to Music** folder). Your configured output folder keeps a copy. |
+| **Apple Music only** | Same import, then **deletes the local copy** from your output folder so the track lives only in Apple Music. Requires **Add to Apple Music**. Works best when Music → Settings → Files has **Copy files to Music Media folder when adding to library** enabled. |
+
+On first use, macOS may ask for permission to let easy-dlp control the Music app (System Settings → Privacy & Security → Automation).
+
+### Skip duplicates
+
+When enabled, easy-dlp checks your music output folder before downloading and offers to skip tracks that already exist there (by predicted filename).
 
 ### Search or paste
 

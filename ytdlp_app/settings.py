@@ -53,6 +53,8 @@ _DEFAULTS: dict[str, Any] = {
     "music_prefer_audio": True,
     "music_search_audio_only": True,
     "music_skip_duplicates": False,
+    "music_add_to_apple_music": False,
+    "music_apple_music_only": False,
 
     # Combined download tab state
     "paste_urls": "",

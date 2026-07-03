@@ -28,6 +28,7 @@ import customtkinter as ctk
 
 from . import __version__, thumbcache
 from .jobs import CANCELLED, DONE, FAILED, Job, JobQueue, QUEUED, RUNNING
+from .metadata.parse import parse_youtube_track
 from .music_duplicates import basename_for_result, basename_for_track, music_exists_in_dir
 from .runtime import find_ffmpeg
 from .search import SearchResult, is_url, resolve_urls
@@ -447,6 +448,32 @@ class App(ctk.CTk):
                 "music_skip_duplicates", self.music_skip_duplicates_var.get(),
             ),
         ).pack(side="left", padx=8, pady=6)
+
+        if sys.platform == "darwin":
+            self.music_add_to_apple_music_var = ctk.BooleanVar(
+                value=bool(self.settings.get("music_add_to_apple_music")),
+            )
+            ctk.CTkCheckBox(
+                opts_frame,
+                text="Add to Apple Music",
+                variable=self.music_add_to_apple_music_var,
+                command=self._on_add_to_apple_music_change,
+            ).pack(side="left", padx=8, pady=6)
+
+            self.music_apple_music_only_var = ctk.BooleanVar(
+                value=bool(self.settings.get("music_apple_music_only")),
+            )
+            self._music_apple_music_only_cb = ctk.CTkCheckBox(
+                opts_frame,
+                text="Apple Music only",
+                variable=self.music_apple_music_only_var,
+                command=self._on_apple_music_only_change,
+            )
+            self._music_apple_music_only_cb.pack(side="left", padx=8, pady=6)
+            if self.music_apple_music_only_var.get():
+                self.music_add_to_apple_music_var.set(True)
+            if not self.music_add_to_apple_music_var.get():
+                self._music_apple_music_only_cb.configure(state="disabled")
 
         ctk.CTkLabel(
             opts_frame,
@@ -1111,12 +1138,37 @@ class App(ctk.CTk):
         except (TypeError, ValueError):
             pass
 
+    def _on_add_to_apple_music_change(self) -> None:
+        enabled = bool(self.music_add_to_apple_music_var.get())
+        self.settings.set("music_add_to_apple_music", enabled)
+        if not enabled:
+            self.music_apple_music_only_var.set(False)
+            self.settings.set("music_apple_music_only", False)
+        self._music_apple_music_only_cb.configure(
+            state="normal" if enabled else "disabled",
+        )
+
+    def _on_apple_music_only_change(self) -> None:
+        only = bool(self.music_apple_music_only_var.get())
+        if only:
+            self.music_add_to_apple_music_var.set(True)
+            self.settings.set("music_add_to_apple_music", True)
+            self._music_apple_music_only_cb.configure(state="normal")
+        self.settings.set("music_apple_music_only", only)
+
     def _music_job_params(self) -> dict[str, Any]:
-        return {
+        params: dict[str, Any] = {
             "download_lyrics": bool(self.music_lyrics_var.get()),
             "prefer_audio": bool(self.music_prefer_audio_var.get()),
             "enrich_metadata": True,
         }
+        if hasattr(self, "music_add_to_apple_music_var"):
+            apple_music_only = bool(self.music_apple_music_only_var.get())
+            params["add_to_apple_music"] = (
+                bool(self.music_add_to_apple_music_var.get()) or apple_music_only
+            )
+            params["apple_music_only"] = apple_music_only
+        return params
 
     def _enqueue_music_download(
         self,
@@ -1776,9 +1828,13 @@ class App(ctk.CTk):
             return
 
         self.music_match_btn.pack_forget()
-        for r in self.music_results:
+        for i, r in enumerate(self.music_results):
             self._music_result_rows.append(
-                _ResultRow(self.music_results_frame, r, self, mode="music"),
+                _ResultRow(
+                    self.music_results_frame, r, self, mode="music",
+                    result_index=i,
+                    alternate_open=(i == self._music_alternate_open_index),
+                ),
             )
 
         if self.music_results:
@@ -1817,12 +1873,25 @@ class App(ctk.CTk):
         self._music_render_results()
         self._set_status(f"Matched to: {result.display_title(60)}")
 
-    def _music_search_alternate(self, track_index: int, query: str) -> None:
+    def _music_apply_search_alternate(
+        self, result_index: int, result: SearchResult,
+    ) -> None:
+        if result_index < 0 or result_index >= len(self.music_results):
+            return
+        self.music_results[result_index] = result
+        self._music_alternate_open_index = None
+        self._music_render_results()
+        self._set_status(f"Changed to: {result.display_title(60)}")
+
+    def _music_search_alternate(
+        self, index: int, query: str, *, mode: str = "track",
+    ) -> None:
         query = (query or "").strip()
         if not query:
             self._set_status("Enter a search query.")
             return
         cookies = self.settings.get("cookies_path") or None
+        ctx = "music_rematch" if mode == "track" else "music_search_rematch"
         self.jobs.enqueue(
             kind="search",
             label=f"Alternate: {_truncate(query, 40)}",
@@ -1831,8 +1900,8 @@ class App(ctk.CTk):
             cookies_path=cookies,
             videos_only=True,
             audio_only=bool(self.music_search_audio_only_var.get()),
-            results_context="music_rematch",
-            track_index=track_index,
+            results_context=ctx,
+            track_index=index,
         )
 
     def _music_clear_results(self) -> None:
@@ -1972,7 +2041,10 @@ class App(ctk.CTk):
         for r in new_items:
             self.music_results.append(r)
             self._music_result_rows.append(
-                _ResultRow(self.music_results_frame, r, self, mode="music"),
+                _ResultRow(
+                    self.music_results_frame, r, self, mode="music",
+                    result_index=len(self.music_results) - 1,
+                ),
             )
         self.music_results_header_label.configure(
             text=f"Results ({len(self.music_results)})",
@@ -2008,7 +2080,7 @@ class App(ctk.CTk):
             # has visible feedback without watching the bottom panel.
             # search_more updates the dedicated bottom indicator instead.
             ctx = job.params.get("results_context", "download")
-            if job.kind == "search" and ctx == "music_rematch":
+            if job.kind == "search" and ctx in ("music_rematch", "music_search_rematch"):
                 panel = self._music_alternate_panels.get(
                     job.params.get("track_index"),
                 )
@@ -2046,7 +2118,7 @@ class App(ctk.CTk):
             # Search / resolve completion: replace results list.
             if job.kind in ("search", "resolve"):
                 ctx = job.params.get("results_context", "download")
-                if job.kind == "search" and ctx == "music_rematch":
+                if job.kind == "search" and ctx in ("music_rematch", "music_search_rematch"):
                     panel = self._music_alternate_panels.get(
                         job.params.get("track_index"),
                     )
@@ -2624,13 +2696,22 @@ class _MusicAlternatePanel:
     def __init__(
         self,
         parent,
-        track: MusicTrack,
-        track_index: int,
+        index: int,
         app: "App",
+        *,
+        track: MusicTrack | None = None,
+        current: SearchResult | None = None,
     ) -> None:
         self.app = app
+        self.index = index
         self.track = track
-        self.track_index = track_index
+        self.current = current
+        self._rematch_mode = "track" if track is not None else "search"
+        self._current_url = ""
+        if track is not None and track.youtube_url:
+            self._current_url = track.youtube_url
+        elif current is not None:
+            self._current_url = current.url
         self._alive = True
         self._rows: list[_MusicAlternateResultRow] = []
 
@@ -2646,38 +2727,52 @@ class _MusicAlternatePanel:
         ctk.CTkButton(
             header, text="Close", width=70,
             fg_color="transparent", border_width=1,
-            command=lambda: app._music_toggle_alternate(track_index),
+            command=lambda: app._music_toggle_alternate(index),
         ).pack(side="right")
 
-        if track.youtube_title:
-            current = track.youtube_title
+        current_label = ""
+        if track is not None and track.youtube_title:
+            current_label = track.youtube_title
             if track.youtube_uploader:
-                current += f"  ·  {track.youtube_uploader}"
+                current_label += f"  ·  {track.youtube_uploader}"
+        elif current is not None:
+            current_label = current.display_title()
+            if current.uploader:
+                current_label += f"  ·  {current.uploader}"
+        if current_label:
             ctk.CTkLabel(
                 self.frame,
-                text=f"Current: {current}",
+                text=f"Current: {current_label}",
                 anchor="w", text_color=("gray40", "gray70"),
                 wraplength=700, justify="left",
             ).pack(fill="x", padx=10, pady=(0, 4))
 
         query_row = ctk.CTkFrame(self.frame, fg_color="transparent")
         query_row.pack(fill="x", padx=8, pady=(0, 4))
-        default_query = " ".join(
-            x for x in (track.artist, track.title) if x
-        ).strip() or track.title
+        if track is not None:
+            default_query = " ".join(
+                x for x in (track.artist, track.title) if x
+            ).strip() or track.title
+        elif current is not None:
+            parsed = parse_youtube_track(current.title, current.uploader)
+            default_query = " ".join(
+                x for x in (parsed.artist, parsed.title) if x
+            ).strip() or current.title
+        else:
+            default_query = ""
         self.query_var = ctk.StringVar(value=default_query)
         entry = ctk.CTkEntry(query_row, textvariable=self.query_var)
         entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         entry.bind(
             "<Return>",
             lambda _e: app._music_search_alternate(
-                track_index, self.query_var.get(),
+                index, self.query_var.get(), mode=self._rematch_mode,
             ),
         )
         ctk.CTkButton(
             query_row, text="Search", width=90,
             command=lambda: app._music_search_alternate(
-                track_index, self.query_var.get(),
+                index, self.query_var.get(), mode=self._rematch_mode,
             ),
         ).pack(side="left")
 
@@ -2690,10 +2785,12 @@ class _MusicAlternatePanel:
         self.results_frame = ctk.CTkScrollableFrame(self.frame, height=200)
         self.results_frame.pack(fill="x", padx=6, pady=(0, 8))
 
-        app._music_alternate_panels[track_index] = self
+        app._music_alternate_panels[index] = self
         app.after(
             50,
-            lambda: app._music_search_alternate(track_index, default_query),
+            lambda: app._music_search_alternate(
+                index, default_query, mode=self._rematch_mode,
+            ),
         )
 
     def set_searching(self, msg: str) -> None:
@@ -2712,6 +2809,8 @@ class _MusicAlternatePanel:
         for row in self._rows:
             row.destroy()
         self._rows.clear()
+        if self._current_url:
+            results = [r for r in results if r.url != self._current_url]
         if not results:
             self.status_label.configure(text="No results — try a different query.")
             return
@@ -2724,11 +2823,14 @@ class _MusicAlternatePanel:
             )
 
     def apply_result(self, result: SearchResult) -> None:
-        self.app._music_apply_manual_match(self.track_index, result)
+        if self._rematch_mode == "track":
+            self.app._music_apply_manual_match(self.index, result)
+        else:
+            self.app._music_apply_search_alternate(self.index, result)
 
     def destroy(self) -> None:
         self._alive = False
-        self.app._music_alternate_panels.pop(self.track_index, None)
+        self.app._music_alternate_panels.pop(self.index, None)
         for row in self._rows:
             row.destroy()
         self._rows.clear()
@@ -2828,7 +2930,7 @@ class _MusicTrackRow:
 
         if alternate_open:
             self._alternate_panel = _MusicAlternatePanel(
-                self.outer, track, track_index, app,
+                self.outer, track_index, app, track=track,
             )
 
     def _kick_off_thumb_fetch(self, url: str) -> None:
@@ -2874,21 +2976,29 @@ class _ResultRow:
         app: "App",
         *,
         mode: str = "download",
+        result_index: int = 0,
+        alternate_open: bool = False,
     ) -> None:
         self.result = result
         self.app = app
         self._alive = True
-        self.frame = ctk.CTkFrame(parent)
-        self.frame.pack(fill="x", padx=4, pady=3)
+        self._alternate_panel: _MusicAlternatePanel | None = None
 
         if mode == "music":
             download_fn = lambda: app._music_download_one(result, override=False)
             folder_fn = lambda: app._music_download_one(result, override=True)
             btn_text = "Download"
+            self.outer = ctk.CTkFrame(parent, fg_color="transparent")
+            self.outer.pack(fill="x", padx=4, pady=3)
+            row_parent = self.outer
         else:
             download_fn = lambda: app._download_one(result, override=False)
             folder_fn = lambda: app._download_one(result, override=True)
             btn_text = "Download"
+            row_parent = parent
+
+        self.frame = ctk.CTkFrame(row_parent)
+        self.frame.pack(fill="x", padx=(0 if mode == "music" else 4), pady=(0 if mode == "music" else 3))
 
         # Thumbnail (left).
         self._ctk_image = ctk.CTkImage(
@@ -2920,6 +3030,12 @@ class _ResultRow:
         # Action buttons (right).
         btn_col = ctk.CTkFrame(self.frame, fg_color="transparent")
         btn_col.pack(side="right", padx=6, pady=4)
+        if mode == "music":
+            ctk.CTkButton(
+                btn_col, text="Change", width=80,
+                fg_color="transparent", border_width=1,
+                command=lambda: app._music_toggle_alternate(result_index),
+            ).pack(side="right", padx=2)
         ctk.CTkButton(btn_col, text="📁", width=44,
                       command=folder_fn).pack(side="right", padx=2)
         ctk.CTkButton(btn_col, text=btn_text, width=110,
@@ -2933,6 +3049,11 @@ class _ResultRow:
         # Kick off the thumbnail fetch. The cache callback may fire on a
         # worker thread, so we hop back to the Tk main loop via `after`.
         self._kick_off_thumb_fetch()
+
+        if mode == "music" and alternate_open:
+            self._alternate_panel = _MusicAlternatePanel(
+                self.outer, result_index, app, current=result,
+            )
 
     def _kick_off_thumb_fetch(self) -> None:
         url = self.result.thumbnail_url
@@ -2960,8 +3081,14 @@ class _ResultRow:
 
     def destroy(self) -> None:
         self._alive = False
+        if self._alternate_panel is not None:
+            self._alternate_panel.destroy()
+            self._alternate_panel = None
         try:
-            self.frame.destroy()
+            if hasattr(self, "outer"):
+                self.outer.destroy()
+            else:
+                self.frame.destroy()
         except Exception:  # noqa: BLE001
             pass
 

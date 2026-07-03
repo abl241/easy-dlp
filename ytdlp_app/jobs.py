@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import apple_music as am
 from . import downloader as dl
 from . import embed as em
 from . import music_postprocess as mp
@@ -320,6 +321,18 @@ class JobQueue:
                         job.state = FAILED
                         job.error = pp.message or "post-process failed"
                         break
+                    if params.get("add_to_apple_music"):
+                        imp = am.import_to_library(
+                            pp.final_path,
+                            progress=log,
+                            cancel_event=job.cancel_event,
+                            remove_source=bool(params.get("apple_music_only")),
+                        )
+                        if not imp.success:
+                            log(
+                                f"WARN: Apple Music import failed"
+                                f" — {imp.message}",
+                            )
 
         elif job.kind == "embed_single":
             result = em.embed_single(
