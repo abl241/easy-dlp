@@ -3,16 +3,14 @@
 Layout:
 
     +-----------------------------------------------------------+
-    |  Tabs: [Download | Music | Embed Thumbnail | Settings]            |
-    |                                                           |
-    |  ... tab content ...                                      |
-    |                                                           |
+    |  Tabs: [Download | Music | Embed Thumbnail | Settings]   |
+    |  ... tab content (results expand to fill) ...             |
     +-----------------------------------------------------------+
-    |  Active downloads (always visible)                        |
+    |  Active downloads (collapsible; auto-shows on job start)|
     +-----------------------------------------------------------+
-    |  Recent jobs (collapsible)                                |
+    |  Recent jobs (collapsed by default)                       |
     +-----------------------------------------------------------+
-    |  Log + status bar                                         |
+    |  Status bar + log (log collapsed by default)            |
     +-----------------------------------------------------------+
 """
 
@@ -30,6 +28,7 @@ import customtkinter as ctk
 
 from . import __version__, thumbcache
 from .jobs import CANCELLED, DONE, FAILED, Job, JobQueue, QUEUED, RUNNING
+from .music_duplicates import basename_for_result, basename_for_track, music_exists_in_dir
 from .runtime import find_ffmpeg
 from .search import SearchResult, is_url, resolve_urls
 from .settings import Settings, _config_dir
@@ -133,7 +132,9 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(f"easy-dlp {__version__}")
-        self.geometry("1000x900")
+        w = int(self.settings.get("window_width") or 1100)
+        h = int(self.settings.get("window_height") or 960)
+        self.geometry(f"{w}x{h}")
         self.minsize(900, 720)
 
         # ----- inter-thread message queue ----- #
@@ -180,6 +181,8 @@ class App(ctk.CTk):
             self.settings.get("music_search_audio_only"),
         )
         self._music_loading_more_label: ctk.CTkLabel | None = None
+        self._music_alternate_open_index: int | None = None
+        self._music_alternate_panels: dict[int, "_MusicAlternatePanel"] = {}
 
         # ----- build UI -----
         # Pack order matters: bottom widgets are packed first (innermost first
@@ -255,15 +258,37 @@ class App(ctk.CTk):
             command=lambda: self.tabs.set("Settings"),
         ).pack(side="right", padx=10, pady=6)
 
-        # ---- source sub-tabs ----
-        self.source_tabs = ctk.CTkTabview(parent, height=140)
-        self.source_tabs.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
+        # ---- source input (collapsible) ----
+        self._download_input_collapsed = bool(
+            self.settings.get("download_input_collapsed"),
+        )
+        input_wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        input_wrap.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
+        self._download_input_wrap = input_wrap
+
+        input_bar = ctk.CTkFrame(input_wrap, fg_color="transparent")
+        input_bar.pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(
+            input_bar, text="Search / Paste", anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=4)
+        self._download_input_toggle_btn = ctk.CTkButton(
+            input_bar, text="Hide input ▾", width=110,
+            fg_color="transparent", border_width=1,
+            command=self._toggle_download_input,
+        )
+        self._download_input_toggle_btn.pack(side="right", padx=2)
+
+        self.source_tabs = ctk.CTkTabview(input_wrap, height=115)
+        self.source_tabs.pack(fill="x")
         self._build_search_subtab(self.source_tabs.add("Search YouTube"))
         self._build_paste_subtab(self.source_tabs.add("Paste URLs"))
         last = self.settings.get("source_tab") or "search"
         self.source_tabs.set(
             "Search YouTube" if last == "search" else "Paste URLs"
         )
+        if self._download_input_collapsed:
+            self._set_download_input_collapsed(True)
 
         # ---- results list (expanding row) ----
         res_outer = ctk.CTkFrame(parent)
@@ -411,6 +436,18 @@ class App(ctk.CTk):
             ),
         ).pack(side="left", padx=8, pady=6)
 
+        self.music_skip_duplicates_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_skip_duplicates")),
+        )
+        ctk.CTkCheckBox(
+            opts_frame,
+            text="Skip duplicates",
+            variable=self.music_skip_duplicates_var,
+            command=lambda: self.settings.set(
+                "music_skip_duplicates", self.music_skip_duplicates_var.get(),
+            ),
+        ).pack(side="left", padx=8, pady=6)
+
         ctk.CTkLabel(
             opts_frame,
             text="MP3 · title filename · metadata auto-applied",
@@ -423,14 +460,35 @@ class App(ctk.CTk):
             command=lambda: self.tabs.set("Settings"),
         ).pack(side="right", padx=10, pady=6)
 
-        self.music_source_tabs = ctk.CTkTabview(parent, height=170)
-        self.music_source_tabs.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
+        self._music_input_collapsed = bool(
+            self.settings.get("music_input_collapsed"),
+        )
+        self._music_input_wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        self._music_input_wrap.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
+
+        music_input_bar = ctk.CTkFrame(self._music_input_wrap, fg_color="transparent")
+        music_input_bar.pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(
+            music_input_bar, text="Search / Paste Link", anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=4)
+        self._music_input_toggle_btn = ctk.CTkButton(
+            music_input_bar, text="Hide input ▾", width=110,
+            fg_color="transparent", border_width=1,
+            command=self._toggle_music_input,
+        )
+        self._music_input_toggle_btn.pack(side="right", padx=2)
+
+        self.music_source_tabs = ctk.CTkTabview(self._music_input_wrap, height=120)
+        self.music_source_tabs.pack(fill="x")
         self._build_music_search_subtab(self.music_source_tabs.add("Search YouTube"))
         self._build_music_paste_subtab(self.music_source_tabs.add("Paste Link"))
         last = self.settings.get("music_source_tab") or "search"
         self.music_source_tabs.set(
             "Search YouTube" if last == "search" else "Paste Link",
         )
+        if self._music_input_collapsed:
+            self._set_music_input_collapsed(True)
 
         res_outer = ctk.CTkFrame(parent)
         res_outer.grid(row=2, column=0, sticky="nsew", padx=8, pady=(4, 8))
@@ -450,6 +508,8 @@ class App(ctk.CTk):
         )
         self.music_match_btn.pack(side="right", padx=2)
         self.music_match_btn.pack_forget()
+        ctk.CTkButton(header, text="New link", width=80,
+                      command=self._music_new_link).pack(side="right", padx=2)
         ctk.CTkButton(header, text="Clear", width=70,
                       command=self._music_clear_results).pack(side="right", padx=2)
         ctk.CTkButton(header, text="📁", width=44,
@@ -542,6 +602,16 @@ class App(ctk.CTk):
         self.music_paste_box.pack(fill="x", padx=10, pady=4)
         self.music_paste_box.insert("1.0", self.settings.get("music_paste_urls") or "")
 
+        self._music_track_list_expanded = bool(
+            self.settings.get("music_track_list_expanded"),
+        )
+        self._music_track_list_toggle_btn = ctk.CTkButton(
+            parent,
+            text="▸ Paste track list instead",
+            fg_color="transparent", border_width=1, anchor="w",
+            command=self._toggle_music_track_list,
+        )
+
         self.music_track_list_frame = ctk.CTkFrame(parent, fg_color="transparent")
         ctk.CTkLabel(
             self.music_track_list_frame,
@@ -583,10 +653,71 @@ class App(ctk.CTk):
     def _apply_music_platform_ui(self) -> None:
         cfg = platform_config(self._music_platform_id())
         self.music_paste_hint_label.configure(text=cfg.hint)
+        if self._music_track_list_expanded:
+            self._music_track_list_toggle_btn.configure(text="▾ Hide track list")
+        else:
+            self._music_track_list_toggle_btn.configure(text="▸ Paste track list instead")
         if cfg.supports_text_fallback:
-            self.music_track_list_frame.pack(fill="x", padx=10, pady=(0, 4))
+            if self._music_track_list_expanded:
+                self._music_track_list_toggle_btn.pack_forget()
+                self.music_track_list_frame.pack(fill="x", padx=10, pady=(0, 4))
+            else:
+                self.music_track_list_frame.pack_forget()
+                self._music_track_list_toggle_btn.pack(
+                    fill="x", padx=10, pady=(0, 4),
+                )
         else:
             self.music_track_list_frame.pack_forget()
+            self._music_track_list_toggle_btn.pack_forget()
+
+    def _toggle_music_track_list(self) -> None:
+        self._music_track_list_expanded = not self._music_track_list_expanded
+        self.settings.set("music_track_list_expanded", self._music_track_list_expanded)
+        if self._music_track_list_expanded:
+            self._music_track_list_toggle_btn.configure(text="▾ Hide track list")
+        else:
+            self._music_track_list_toggle_btn.configure(text="▸ Paste track list instead")
+        self._apply_music_platform_ui()
+
+    # ------------------------- Input collapse (Download / Music) ------------
+
+    def _set_download_input_collapsed(self, collapsed: bool) -> None:
+        self._download_input_collapsed = collapsed
+        if collapsed:
+            self.source_tabs.pack_forget()
+            self._download_input_toggle_btn.configure(text="Show input ▸")
+        else:
+            self.source_tabs.pack(fill="x")
+            self._download_input_toggle_btn.configure(text="Hide input ▾")
+        self.settings.set("download_input_collapsed", collapsed)
+
+    def _toggle_download_input(self) -> None:
+        self._set_download_input_collapsed(not self._download_input_collapsed)
+
+    def _collapse_download_input_if_results(self) -> None:
+        if self.results:
+            self._set_download_input_collapsed(True)
+
+    def _set_music_input_collapsed(self, collapsed: bool) -> None:
+        self._music_input_collapsed = collapsed
+        if collapsed:
+            self.music_source_tabs.pack_forget()
+            self._music_input_toggle_btn.configure(text="Show input ▸")
+        else:
+            self.music_source_tabs.pack(fill="x")
+            self._music_input_toggle_btn.configure(text="Hide input ▾")
+        self.settings.set("music_input_collapsed", collapsed)
+
+    def _toggle_music_input(self) -> None:
+        self._set_music_input_collapsed(not self._music_input_collapsed)
+
+    def _collapse_music_input_if_results(self) -> None:
+        if self.music_results or self.music_tracks:
+            self._set_music_input_collapsed(True)
+
+    def _ensure_active_expanded(self) -> None:
+        if self._active_collapsed:
+            self._toggle_active()
 
     # ------------------------- Embed tab ------------------------------------
 
@@ -1026,6 +1157,136 @@ class App(ctk.CTk):
             **params,
         )
 
+    def _music_duplicate_check(
+        self,
+        out_dir: str,
+        *,
+        result: SearchResult | None = None,
+        track: MusicTrack | None = None,
+    ) -> tuple[bool, str]:
+        if track is not None:
+            basename = basename_for_track(track)
+            display = track.display_title()
+        elif result is not None:
+            basename = basename_for_result(result)
+            display = result.display_title()
+        else:
+            return False, ""
+        return music_exists_in_dir(out_dir, basename), display
+
+    def _ask_batch_duplicate_action(self, names: list[str], out_dir: str) -> str:
+        folder = Path(out_dir).name or out_dir
+        preview = names[:12]
+        lines = "\n".join(f"  • {n}" for n in preview)
+        extra = f"\n  … and {len(names) - 12} more" if len(names) > 12 else ""
+        msg = (
+            f"{len(names)} track(s) already exist in {folder}:\n\n"
+            f"{lines}{extra}\n\n"
+            "Yes — download all (including duplicates)\n"
+            "No — skip duplicates, download the rest\n"
+            "Cancel — abort"
+        )
+        choice = messagebox.askyesnocancel("Skip duplicates", msg)
+        if choice is None:
+            return "cancel"
+        return "all" if choice else "skip"
+
+    def _notify_skipped_duplicates(self, names: list[str]) -> None:
+        if not names:
+            return
+        preview = "\n".join(f"  • {n}" for n in names[:15])
+        extra = f"\n  … and {len(names) - 15} more" if len(names) > 15 else ""
+        self._set_status(f"Skipped {len(names)} duplicate(s)")
+        messagebox.showinfo(
+            "Skipped duplicates",
+            f"Skipped {len(names)} track(s) already in folder:\n\n{preview}{extra}",
+        )
+
+    def _maybe_enqueue_music_download(
+        self,
+        url: str,
+        label: str,
+        *,
+        out_dir: str,
+        cookies: str | None,
+        result: SearchResult | None = None,
+        track: MusicTrack | None = None,
+        force: bool = False,
+    ) -> bool:
+        if not force and self.music_skip_duplicates_var.get():
+            exists, display = self._music_duplicate_check(
+                out_dir, result=result, track=track,
+            )
+            if exists:
+                folder = Path(out_dir).name or out_dir
+                if not messagebox.askyesno(
+                    "Already downloaded",
+                    f"{display} already exists in {folder}.\n\nDownload anyway?",
+                ):
+                    self._set_status(f"Skipped duplicate: {display}")
+                    return False
+        self._enqueue_music_download(
+            url, label,
+            out_dir=out_dir, cookies=cookies, result=result, track=track,
+        )
+        return True
+
+    def _enqueue_music_downloads_batch(
+        self,
+        out_dir: str,
+        cookies: str | None,
+        items: list[tuple[str, str, SearchResult | None, MusicTrack | None]],
+    ) -> None:
+        if not items:
+            return
+        if not self.music_skip_duplicates_var.get():
+            for url, label, result, track in items:
+                self._enqueue_music_download(
+                    url, label,
+                    out_dir=out_dir, cookies=cookies, result=result, track=track,
+                )
+            return
+
+        to_enqueue: list[tuple[str, str, SearchResult | None, MusicTrack | None]] = []
+        skipped: list[tuple[str, str, SearchResult | None, MusicTrack | None, str]] = []
+        for url, label, result, track in items:
+            exists, display = self._music_duplicate_check(
+                out_dir, result=result, track=track,
+            )
+            if exists:
+                skipped.append((url, label, result, track, display))
+            else:
+                to_enqueue.append((url, label, result, track))
+
+        if not skipped:
+            for url, label, result, track in items:
+                self._enqueue_music_download(
+                    url, label,
+                    out_dir=out_dir, cookies=cookies, result=result, track=track,
+                )
+            return
+
+        action = self._ask_batch_duplicate_action(
+            [display for *_, display in skipped], out_dir,
+        )
+        if action == "cancel":
+            self._set_status("Download cancelled.")
+            return
+        if action == "all":
+            for url, label, result, track in items:
+                self._enqueue_music_download(
+                    url, label,
+                    out_dir=out_dir, cookies=cookies, result=result, track=track,
+                )
+            return
+
+        self._notify_skipped_duplicates([display for *_, display in skipped])
+        for url, label, result, track in to_enqueue:
+            self._enqueue_music_download(
+                url, label,
+                out_dir=out_dir, cookies=cookies, result=result, track=track,
+            )
+
     def _do_search(self) -> None:
         query = self.search_var.get().strip()
         self.settings.set("search_query", query)
@@ -1229,27 +1490,22 @@ class App(ctk.CTk):
             return
 
         cookies = self.settings.get("cookies_path") or None
+        items: list[tuple[str, str, SearchResult | None, MusicTrack | None]] = []
         if self.music_prefer_audio_var.get():
             for raw_url in urls:
                 results = resolve_urls([raw_url], cookies_path=cookies)
                 if not results:
                     label = f"Music: {_truncate(raw_url, 80)}"
-                    self._enqueue_music_download(
-                        raw_url, label, out_dir=out_dir, cookies=cookies,
-                    )
+                    items.append((raw_url, label, None, None))
                     continue
                 for result in results:
                     label = f"Music: {_truncate(result.display_title(60), 60)}"
-                    self._enqueue_music_download(
-                        result.url, label,
-                        out_dir=out_dir, cookies=cookies, result=result,
-                    )
-            return
-        for url in urls:
-            label = f"Music: {_truncate(url, 80)}"
-            self._enqueue_music_download(
-                url, label, out_dir=out_dir, cookies=cookies,
-            )
+                    items.append((result.url, label, result, None))
+        else:
+            for url in urls:
+                label = f"Music: {_truncate(url, 80)}"
+                items.append((url, label, None, None))
+        self._enqueue_music_downloads_batch(out_dir, cookies, items)
 
     def _download_one(self, result: SearchResult, *, override: bool) -> None:
         formats = self._checked_formats()
@@ -1293,7 +1549,7 @@ class App(ctk.CTk):
             return
         cookies = self.settings.get("cookies_path") or None
         label = f"Music: {_truncate(result.display_title(60), 60)}"
-        self._enqueue_music_download(
+        self._maybe_enqueue_music_download(
             result.url, label, out_dir=out_dir, cookies=cookies, result=result,
         )
 
@@ -1346,7 +1602,7 @@ class App(ctk.CTk):
             return
         cookies = self.settings.get("cookies_path") or None
         label = f"Music: {_truncate(track.display_title(60), 60)}"
-        self._enqueue_music_download(
+        self._maybe_enqueue_music_download(
             track.youtube_url, label,
             out_dir=out_dir, cookies=cookies, track=track,
         )
@@ -1371,14 +1627,13 @@ class App(ctk.CTk):
 
     def _music_enqueue_matched_downloads(self, out_dir: str) -> None:
         cookies = self.settings.get("cookies_path") or None
+        items: list[tuple[str, str, SearchResult | None, MusicTrack | None]] = []
         for track in self.music_tracks:
             if not track.is_downloadable() or not track.youtube_url:
                 continue
             label = f"Music: {_truncate(track.display_title(60), 60)}"
-            self._enqueue_music_download(
-                track.youtube_url, label,
-                out_dir=out_dir, cookies=cookies, track=track,
-            )
+            items.append((track.youtube_url, label, None, track))
+        self._enqueue_music_downloads_batch(out_dir, cookies, items)
 
     def _music_download_all(self, *, override: bool) -> None:
         if self._music_showing_tracks:
@@ -1442,11 +1697,16 @@ class App(ctk.CTk):
             )
             return
         cookies = self.settings.get("cookies_path") or None
-        for result in self.music_results:
-            label = f"Music: {_truncate(result.display_title(60), 60)}"
-            self._enqueue_music_download(
-                result.url, label, out_dir=out_dir, cookies=cookies, result=result,
+        items = [
+            (
+                result.url,
+                f"Music: {_truncate(result.display_title(60), 60)}",
+                result,
+                None,
             )
+            for result in self.music_results
+        ]
+        self._enqueue_music_downloads_batch(out_dir, cookies, items)
 
     # ====================== Rendering ======================================
 
@@ -1476,6 +1736,7 @@ class App(ctk.CTk):
 
     def _music_render_results(self) -> None:
         self._music_clear_loading_indicator()
+        self._music_alternate_panels.clear()
         for row in self._music_result_rows:
             row.destroy()
         self._music_result_rows.clear()
@@ -1484,9 +1745,13 @@ class App(ctk.CTk):
         self._music_track_rows.clear()
 
         if self._music_showing_tracks:
-            for track in self.music_tracks:
+            for i, track in enumerate(self.music_tracks):
                 self._music_track_rows.append(
-                    _MusicTrackRow(self.music_results_frame, track, self),
+                    _MusicTrackRow(
+                        self.music_results_frame, track, self,
+                        track_index=i,
+                        alternate_open=(i == self._music_alternate_open_index),
+                    ),
                 )
             matched = sum(1 for t in self.music_tracks if t.is_downloadable())
             failed = sum(1 for t in self.music_tracks if t.match_status == "failed")
@@ -1525,7 +1790,54 @@ class App(ctk.CTk):
                 text="Results (0) — search or paste a link above",
             )
 
+    def _music_new_link(self) -> None:
+        """Clear the current playlist/results and show the paste/search input."""
+        self._music_clear_results()
+        self.music_source_tabs.set("Paste Link")
+        self.settings.set("music_source_tab", "paste")
+        self._set_music_input_collapsed(False)
+        self.music_paste_box.focus_set()
+
+    def _music_toggle_alternate(self, track_index: int) -> None:
+        if self._music_alternate_open_index == track_index:
+            self._music_alternate_open_index = None
+        else:
+            self._music_alternate_open_index = track_index
+        self._music_render_results()
+
+    def _music_apply_manual_match(
+        self, track_index: int, result: SearchResult,
+    ) -> None:
+        if track_index < 0 or track_index >= len(self.music_tracks):
+            return
+        self.music_tracks[track_index] = self.music_tracks[track_index].with_match(
+            result,
+        )
+        self._music_alternate_open_index = None
+        self._music_render_results()
+        self._set_status(f"Matched to: {result.display_title(60)}")
+
+    def _music_search_alternate(self, track_index: int, query: str) -> None:
+        query = (query or "").strip()
+        if not query:
+            self._set_status("Enter a search query.")
+            return
+        cookies = self.settings.get("cookies_path") or None
+        self.jobs.enqueue(
+            kind="search",
+            label=f"Alternate: {_truncate(query, 40)}",
+            query=query,
+            limit=15,
+            cookies_path=cookies,
+            videos_only=True,
+            audio_only=bool(self.music_search_audio_only_var.get()),
+            results_context="music_rematch",
+            track_index=track_index,
+        )
+
     def _music_clear_results(self) -> None:
+        self._music_alternate_open_index = None
+        self._music_alternate_panels.clear()
         self.music_results = []
         self.music_tracks = []
         self._music_showing_tracks = False
@@ -1686,6 +1998,7 @@ class App(ctk.CTk):
         # user already sees the in-place "Loading more results..." indicator.
         if job.is_active:
             if job.kind != "search_more":
+                self._ensure_active_expanded()
                 row = self._active_rows.get(job.id)
                 if row is None:
                     row = _ActiveRow(self.active_frame, job, self)
@@ -1695,7 +2008,13 @@ class App(ctk.CTk):
             # has visible feedback without watching the bottom panel.
             # search_more updates the dedicated bottom indicator instead.
             ctx = job.params.get("results_context", "download")
-            if job.kind == "search":
+            if job.kind == "search" and ctx == "music_rematch":
+                panel = self._music_alternate_panels.get(
+                    job.params.get("track_index"),
+                )
+                if panel is not None:
+                    panel.set_searching(job.progress_msg or "Searching…")
+            elif job.kind == "search":
                 hdr = (
                     self.music_results_header_label
                     if ctx == "music"
@@ -1727,15 +2046,32 @@ class App(ctk.CTk):
             # Search / resolve completion: replace results list.
             if job.kind in ("search", "resolve"):
                 ctx = job.params.get("results_context", "download")
-                if job.state == DONE and isinstance(job.result, list):
+                if job.kind == "search" and ctx == "music_rematch":
+                    panel = self._music_alternate_panels.get(
+                        job.params.get("track_index"),
+                    )
+                    if job.state == DONE and panel is not None:
+                        results = job.result if isinstance(job.result, list) else []
+                        panel.set_results(results)
+                        self._set_status(
+                            f"Found {len(results)} alternate YouTube result(s).",
+                        )
+                    elif job.state == FAILED and panel is not None:
+                        panel.set_error(job.error or "Search failed")
+                        self._set_status(f"Alternate search failed: {job.error}")
+                    elif job.state == CANCELLED and panel is not None:
+                        panel.set_searching("Cancelled")
+                elif job.state == DONE and isinstance(job.result, list):
                     if ctx == "music":
                         self.music_results = list(job.result)
                         self.music_tracks = []
                         self._music_showing_tracks = False
                         self._music_render_results()
+                        self._collapse_music_input_if_results()
                     else:
                         self.results = list(job.result)
                         self._render_results()
+                        self._collapse_download_input_if_results()
                     self._set_status(
                         f"{job.kind.capitalize()} returned {len(job.result)} result(s)."
                     )
@@ -1782,6 +2118,7 @@ class App(ctk.CTk):
                     self._music_showing_tracks = True
                     self._music_search_query = None
                     self._music_render_results()
+                    self._collapse_music_input_if_results()
                     self._set_status(
                         f"Resolved {len(self.music_tracks)} track(s).",
                     )
@@ -2193,6 +2530,13 @@ class App(ctk.CTk):
 
     def _on_close(self) -> None:
         try:
+            w = max(900, int(self.winfo_width()))
+            h = max(720, int(self.winfo_height()))
+            self.settings.set("window_width", w)
+            self.settings.set("window_height", h)
+        except (TypeError, ValueError, Exception):  # noqa: BLE001
+            pass
+        try:
             self.jobs.shutdown(wait=False)
         except Exception:  # noqa: BLE001
             pass
@@ -2207,15 +2551,216 @@ class App(ctk.CTk):
 # Sub-widgets: ResultRow, ActiveRow, RecentRow
 # ============================================================================
 
+_ALT_THUMB_SIZE = (96, 54)
+
+
+class _MusicAlternateResultRow:
+    """Compact YouTube result row inside the alternate-match picker."""
+
+    def __init__(
+        self,
+        parent,
+        result: SearchResult,
+        panel: "_MusicAlternatePanel",
+    ) -> None:
+        self._alive = True
+        self.frame = ctk.CTkFrame(parent)
+        self.frame.pack(fill="x", padx=2, pady=2)
+
+        self._ctk_image = ctk.CTkImage(
+            light_image=thumbcache.placeholder(_ALT_THUMB_SIZE),
+            dark_image=thumbcache.placeholder(_ALT_THUMB_SIZE),
+            size=_ALT_THUMB_SIZE,
+        )
+        self.thumb_label = ctk.CTkLabel(
+            self.frame, text="", image=self._ctk_image,
+            width=_ALT_THUMB_SIZE[0], height=_ALT_THUMB_SIZE[1],
+        )
+        self.thumb_label.pack(side="left", padx=(4, 6), pady=4)
+
+        text_col = ctk.CTkFrame(self.frame, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True, padx=2, pady=4)
+        ctk.CTkLabel(
+            text_col, text=result.display_title(80),
+            anchor="w", font=ctk.CTkFont(weight="bold"),
+            wraplength=420, justify="left",
+        ).pack(fill="x")
+        meta = result.metadata_line()
+        if meta:
+            ctk.CTkLabel(
+                text_col, text=meta, anchor="w", text_color=("gray40", "gray70"),
+            ).pack(fill="x")
+
+        ctk.CTkButton(
+            self.frame, text="Use this", width=90,
+            command=lambda: panel.apply_result(result),
+        ).pack(side="right", padx=6, pady=4)
+
+        if result.thumbnail_url:
+            thumbcache.load(result.thumbnail_url, self._on_thumb)
+
+    def _on_thumb(self, img) -> None:
+        if not self._alive or img is None:
+            return
+        try:
+            resized = img.resize(_ALT_THUMB_SIZE)
+            self._ctk_image.configure(
+                light_image=resized, dark_image=resized, size=_ALT_THUMB_SIZE,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def destroy(self) -> None:
+        self._alive = False
+        try:
+            self.frame.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class _MusicAlternatePanel:
+    """Expandable YouTube search picker for manually choosing a track match."""
+
+    def __init__(
+        self,
+        parent,
+        track: MusicTrack,
+        track_index: int,
+        app: "App",
+    ) -> None:
+        self.app = app
+        self.track = track
+        self.track_index = track_index
+        self._alive = True
+        self._rows: list[_MusicAlternateResultRow] = []
+
+        self.frame = ctk.CTkFrame(parent, fg_color=("gray92", "gray20"))
+        self.frame.pack(fill="x", padx=8, pady=(0, 4))
+
+        header = ctk.CTkFrame(self.frame, fg_color="transparent")
+        header.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(
+            header, text="Pick alternate YouTube match",
+            anchor="w", font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            header, text="Close", width=70,
+            fg_color="transparent", border_width=1,
+            command=lambda: app._music_toggle_alternate(track_index),
+        ).pack(side="right")
+
+        if track.youtube_title:
+            current = track.youtube_title
+            if track.youtube_uploader:
+                current += f"  ·  {track.youtube_uploader}"
+            ctk.CTkLabel(
+                self.frame,
+                text=f"Current: {current}",
+                anchor="w", text_color=("gray40", "gray70"),
+                wraplength=700, justify="left",
+            ).pack(fill="x", padx=10, pady=(0, 4))
+
+        query_row = ctk.CTkFrame(self.frame, fg_color="transparent")
+        query_row.pack(fill="x", padx=8, pady=(0, 4))
+        default_query = " ".join(
+            x for x in (track.artist, track.title) if x
+        ).strip() or track.title
+        self.query_var = ctk.StringVar(value=default_query)
+        entry = ctk.CTkEntry(query_row, textvariable=self.query_var)
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        entry.bind(
+            "<Return>",
+            lambda _e: app._music_search_alternate(
+                track_index, self.query_var.get(),
+            ),
+        )
+        ctk.CTkButton(
+            query_row, text="Search", width=90,
+            command=lambda: app._music_search_alternate(
+                track_index, self.query_var.get(),
+            ),
+        ).pack(side="left")
+
+        self.status_label = ctk.CTkLabel(
+            self.frame, text="Searching YouTube…",
+            anchor="w", text_color=("gray40", "gray70"),
+        )
+        self.status_label.pack(fill="x", padx=10, pady=(0, 4))
+
+        self.results_frame = ctk.CTkScrollableFrame(self.frame, height=200)
+        self.results_frame.pack(fill="x", padx=6, pady=(0, 8))
+
+        app._music_alternate_panels[track_index] = self
+        app.after(
+            50,
+            lambda: app._music_search_alternate(track_index, default_query),
+        )
+
+    def set_searching(self, msg: str) -> None:
+        if not self._alive:
+            return
+        self.status_label.configure(text=msg or "Searching…")
+
+    def set_error(self, msg: str) -> None:
+        if not self._alive:
+            return
+        self.status_label.configure(text=f"Error: {msg}")
+
+    def set_results(self, results: list[SearchResult]) -> None:
+        if not self._alive:
+            return
+        for row in self._rows:
+            row.destroy()
+        self._rows.clear()
+        if not results:
+            self.status_label.configure(text="No results — try a different query.")
+            return
+        self.status_label.configure(
+            text=f"{len(results)} result(s) — click Use this to match",
+        )
+        for result in results:
+            self._rows.append(
+                _MusicAlternateResultRow(self.results_frame, result, self),
+            )
+
+    def apply_result(self, result: SearchResult) -> None:
+        self.app._music_apply_manual_match(self.track_index, result)
+
+    def destroy(self) -> None:
+        self._alive = False
+        self.app._music_alternate_panels.pop(self.track_index, None)
+        for row in self._rows:
+            row.destroy()
+        self._rows.clear()
+        try:
+            self.frame.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class _MusicTrackRow:
     """One row for an imported track (Spotify, etc.) before/after YouTube match."""
 
-    def __init__(self, parent, track: MusicTrack, app: "App") -> None:
+    def __init__(
+        self,
+        parent,
+        track: MusicTrack,
+        app: "App",
+        *,
+        track_index: int,
+        alternate_open: bool = False,
+    ) -> None:
         self.track = track
         self.app = app
+        self.track_index = track_index
         self._alive = True
-        self.frame = ctk.CTkFrame(parent)
-        self.frame.pack(fill="x", padx=4, pady=3)
+        self._alternate_panel: _MusicAlternatePanel | None = None
+
+        self.outer = ctk.CTkFrame(parent, fg_color="transparent")
+        self.outer.pack(fill="x", padx=4, pady=3)
+
+        self.frame = ctk.CTkFrame(self.outer)
+        self.frame.pack(fill="x")
 
         thumb_url = track.cover_url or track.thumbnail_url
         self._ctk_image = ctk.CTkImage(
@@ -2250,6 +2795,11 @@ class _MusicTrackRow:
 
         if track.is_downloadable():
             ctk.CTkButton(
+                btn_col, text="Change", width=80,
+                fg_color="transparent", border_width=1,
+                command=lambda: app._music_toggle_alternate(track_index),
+            ).pack(side="right", padx=2)
+            ctk.CTkButton(
                 btn_col, text="📁", width=44,
                 command=lambda: app._music_download_one_track(track, override=True),
             ).pack(side="right", padx=2)
@@ -2263,6 +2813,11 @@ class _MusicTrackRow:
             ).pack(side="right", padx=8)
         else:
             ctk.CTkButton(
+                btn_col, text="Pick match", width=100,
+                fg_color="transparent", border_width=1,
+                command=lambda: app._music_toggle_alternate(track_index),
+            ).pack(side="right", padx=2)
+            ctk.CTkButton(
                 btn_col, text="Retry", width=80,
                 command=app._music_match_all,
             ).pack(side="right", padx=2)
@@ -2270,6 +2825,11 @@ class _MusicTrackRow:
         app._bind_results_mousewheel(self.frame)
         if thumb_url:
             self._kick_off_thumb_fetch(thumb_url)
+
+        if alternate_open:
+            self._alternate_panel = _MusicAlternatePanel(
+                self.outer, track, track_index, app,
+            )
 
     def _kick_off_thumb_fetch(self, url: str) -> None:
         def _on_loaded(img) -> None:
@@ -2295,8 +2855,11 @@ class _MusicTrackRow:
 
     def destroy(self) -> None:
         self._alive = False
+        if self._alternate_panel is not None:
+            self._alternate_panel.destroy()
+            self._alternate_panel = None
         try:
-            self.frame.destroy()
+            self.outer.destroy()
         except Exception:  # noqa: BLE001
             pass
 
