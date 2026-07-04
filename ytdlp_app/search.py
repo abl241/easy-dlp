@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
+from urllib.parse import quote_plus
 
 import yt_dlp
 
@@ -64,13 +66,16 @@ def search_youtube(
     progress: ProgressFn = lambda msg: None,
     videos_only: bool = True,
     audio_only: bool = False,
+    use_youtube_music: bool = False,
 ) -> list[SearchResult]:
     """Run a YouTube search OR resolve a single URL if `query` looks like one.
 
     Filters:
         videos_only — drop channel/playlist/live-stream entries (default on).
         audio_only  — drop titles that look like music videos / lives, and
-                      prefer auto-generated "* - Topic" channels.
+                      prefer auto-generated "* - Topic" channels. Ignored when
+                      `use_youtube_music` is True (songs tab is already scoped).
+        use_youtube_music — search music.youtube.com #songs instead of ytsearch.
     """
     query = (query or "").strip()
     if not query:
@@ -80,10 +85,27 @@ def search_youtube(
         return resolve_urls([query], cookies_path=cookies_path,
                             cancel_event=cancel_event, progress=progress)
 
+    raw_limit = max(1, int(limit))
+    if use_youtube_music:
+        progress(f"Searching YouTube Music for {query!r}...")
+        target = _youtube_music_search_url(query)
+        info = _extract_info(target, cookies_path=cookies_path,
+                             cancel_event=cancel_event)
+        results = _entries_to_results(
+            info, source="search", videos_only=True,
+            allow_missing_duration=True,
+        )
+        results = results[: int(limit)] if len(results) > limit else results
+        return _enrich_flat_results(
+            results,
+            cookies_path=cookies_path,
+            cancel_event=cancel_event,
+            progress=progress,
+        )
+
     progress(f"Searching YouTube for {query!r}...")
     # Over-fetch a bit when filters are on so the user still sees roughly the
     # requested number of rows after we drop non-matches.
-    raw_limit = max(1, int(limit))
     if videos_only or audio_only:
         raw_limit = max(raw_limit, int(raw_limit * 1.5))
     target = f"ytsearch{raw_limit}:{query}"
@@ -93,6 +115,11 @@ def search_youtube(
     if audio_only:
         results = _filter_audio_only(results)
     return results[: int(limit)] if len(results) > limit else results
+
+
+def _youtube_music_search_url(query: str) -> str:
+    """YouTube Music songs-tab search URL understood by yt-dlp."""
+    return f"https://music.youtube.com/search?q={quote_plus(query)}#songs"
 
 
 def find_preferred_audio_url(
@@ -170,6 +197,8 @@ def find_youtube_match_for_track(
     cookies_path: str | None = None,
     cancel_event: threading.Event | None = None,
     progress: ProgressFn = lambda msg: None,
+    use_youtube_music: bool = False,
+    audio_only: bool = True,
 ) -> SearchResult | None:
     """Search YouTube for the best match for a known track.
 
@@ -193,8 +222,35 @@ def find_youtube_match_for_track(
     )
     parsed = ParsedTrack(artist=artist, title=title)
 
-    for audio_only in (True, False):
-        label = "audio" if audio_only else "any upload"
+    if use_youtube_music:
+        progress(f"Searching YouTube Music for {query!r}...")
+        candidates = search_youtube(
+            query,
+            limit=10,
+            cookies_path=cookies_path,
+            cancel_event=cancel_event,
+            progress=progress,
+            use_youtube_music=True,
+        )
+        if candidates:
+            best = _pick_best_audio_candidate(
+                candidates, stub, parsed,
+                expected_duration_s=duration_s,
+                min_score=0.45,
+            )
+            if best is not None:
+                return _enrich_flat_results(
+                    [best],
+                    cookies_path=cookies_path,
+                    cancel_event=cancel_event,
+                    progress=progress,
+                )[0]
+        progress("No confident YouTube Music match — trying regular YouTube…")
+
+    for try_audio in (True, False):
+        if not try_audio and use_youtube_music:
+            break
+        label = "audio" if try_audio else "any upload"
         progress(f"Searching YouTube ({label}) for {query!r}...")
         candidates = search_youtube(
             query,
@@ -203,23 +259,23 @@ def find_youtube_match_for_track(
             cancel_event=cancel_event,
             progress=progress,
             videos_only=True,
-            audio_only=audio_only,
+            audio_only=try_audio and audio_only,
         )
         if not candidates:
-            if audio_only:
+            if try_audio:
                 progress("No audio uploads found — trying music videos…")
             continue
-        min_score = 0.55 if audio_only else 0.45
+        min_score = 0.55 if try_audio else 0.45
         best = _pick_best_audio_candidate(
             candidates, stub, parsed,
             expected_duration_s=duration_s,
             min_score=min_score,
         )
         if best is not None:
-            if not audio_only:
+            if not try_audio:
                 progress(f"Using music video: {best.display_title(70)}")
             return best
-        if audio_only:
+        if try_audio:
             progress("No confident audio match — trying music videos…")
     return None
 
@@ -297,6 +353,7 @@ def _entries_to_results(
     *,
     source: str,
     videos_only: bool = False,
+    allow_missing_duration: bool = False,
 ) -> list[SearchResult]:
     entries = info.get("entries")
     out: list[SearchResult] = []
@@ -304,7 +361,9 @@ def _entries_to_results(
         for entry in entries:
             if not entry:
                 continue
-            if videos_only and not _looks_like_video(entry):
+            if videos_only and not _looks_like_video(
+                entry, allow_missing_duration=allow_missing_duration,
+            ):
                 continue
             r = _entry_to_result(entry, source=source)
             if r is not None:
@@ -338,11 +397,12 @@ _VIDEO_HINT_RE = re.compile(
 )
 
 
-def _looks_like_video(entry: dict[str, Any]) -> bool:
+def _looks_like_video(entry: dict[str, Any], *, allow_missing_duration: bool = False) -> bool:
     """Heuristic: True iff the raw yt-dlp entry is an actual watchable video.
 
     Filters out channel pages, playlists, and entries with no duration metadata
-    (often upcoming live streams or yt-dlp probe failures).
+    (often upcoming live streams or yt-dlp probe failures). YouTube Music flat
+    search results omit duration; pass `allow_missing_duration=True` for those.
     """
     if not isinstance(entry, dict):
         return False
@@ -358,7 +418,7 @@ def _looks_like_video(entry: dict[str, Any]) -> bool:
         return False
     # Live / scheduled streams typically come back with no duration.
     if entry.get("duration") in (None, 0):
-        return False
+        return allow_missing_duration and bool(entry.get("id"))
     return True
 
 
@@ -509,13 +569,18 @@ def _entry_to_result(entry: dict[str, Any], *, source: str) -> SearchResult | No
         return None
 
     title = entry.get("title") or entry.get("fulltitle") or video_id or "(no title)"
-    uploader = entry.get("uploader") or entry.get("channel") or entry.get("uploader_id") or ""
+    uploader = (
+        entry.get("artist") or entry.get("uploader") or entry.get("channel")
+        or entry.get("uploader_id") or ""
+    )
     duration = entry.get("duration")
     duration_s = int(duration) if isinstance(duration, (int, float)) else None
     view_count = entry.get("view_count")
     view_count = int(view_count) if isinstance(view_count, (int, float)) else None
     upload_date = entry.get("upload_date") if isinstance(entry.get("upload_date"), str) else None
     thumbnail_url = entry.get("thumbnail") or _best_thumbnail(entry.get("thumbnails"))
+    if not thumbnail_url and video_id:
+        thumbnail_url = _youtube_thumbnail_url(str(video_id))
 
     return SearchResult(
         url=url,
@@ -539,6 +604,131 @@ def _best_thumbnail(thumbs: Any) -> str | None:
         return None
     candidates.sort(key=lambda t: abs(int(t.get("width") or 320) - 320))
     return candidates[0].get("url")
+
+
+_VIDEO_ID_RE = re.compile(r"(?:v=|/)([a-zA-Z0-9_-]{11})")
+
+
+def _youtube_thumbnail_url(video_id: str) -> str:
+    return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
+
+
+def _video_id_from_url(url: str) -> str | None:
+    match = _VIDEO_ID_RE.search(url or "")
+    return match.group(1) if match else None
+
+
+def _needs_metadata_enrichment(result: SearchResult) -> bool:
+    return not (result.uploader or "").strip()
+
+
+def _extract_flat_video_info(
+    video_id: str,
+    *,
+    cookies_path: str | None,
+) -> dict[str, Any]:
+    """Lightweight per-video metadata fetch (artist, thumb, duration)."""
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": True,
+        "socket_timeout": 15,
+    }
+    if cookies_path:
+        opts["cookiefile"] = cookies_path
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+        return info if isinstance(info, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _merge_enriched_result(
+    base: SearchResult, info: dict[str, Any],
+) -> SearchResult:
+    if not info:
+        return base
+    uploader = (
+        info.get("artist") or info.get("uploader") or info.get("channel")
+        or base.uploader
+    )
+    thumbnail_url = (
+        info.get("thumbnail")
+        or _best_thumbnail(info.get("thumbnails"))
+        or base.thumbnail_url
+    )
+    video_id = info.get("id") or _video_id_from_url(base.url)
+    if not thumbnail_url and video_id:
+        thumbnail_url = _youtube_thumbnail_url(str(video_id))
+    duration = info.get("duration")
+    duration_s = base.duration_s
+    if isinstance(duration, (int, float)):
+        duration_s = int(duration)
+    view_count = base.view_count
+    raw_views = info.get("view_count")
+    if isinstance(raw_views, (int, float)):
+        view_count = int(raw_views)
+    upload_date = base.upload_date
+    if isinstance(info.get("upload_date"), str):
+        upload_date = info.get("upload_date")
+    return SearchResult(
+        url=base.url,
+        title=str(info.get("title") or base.title),
+        uploader=str(uploader) if uploader else "",
+        duration_s=duration_s,
+        view_count=view_count,
+        upload_date=upload_date,
+        thumbnail_url=thumbnail_url,
+        source=base.source,
+    )
+
+
+def _enrich_flat_results(
+    results: list[SearchResult],
+    *,
+    cookies_path: str | None,
+    cancel_event: threading.Event | None,
+    progress: ProgressFn,
+) -> list[SearchResult]:
+    """Fill missing artist/thumbnail fields from per-video yt-dlp lookups."""
+    pending: list[tuple[int, SearchResult]] = [
+        (i, r) for i, r in enumerate(results) if _needs_metadata_enrichment(r)
+    ]
+    if not pending:
+        return results
+    total = len(pending)
+    progress(f"Loading artist info (0/{total})...")
+    enriched: dict[int, SearchResult] = {}
+    done = 0
+
+    def _enrich_one(item: tuple[int, SearchResult]) -> tuple[int, SearchResult]:
+        index, result = item
+        video_id = _video_id_from_url(result.url)
+        if not video_id:
+            return index, result
+        info = _extract_flat_video_info(video_id, cookies_path=cookies_path)
+        return index, _merge_enriched_result(result, info)
+
+    workers = min(4, total)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_enrich_one, item) for item in pending]
+        for fut in as_completed(futures):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            index, result = fut.result()
+            enriched[index] = result
+            done += 1
+            progress(f"Loading artist info ({done}/{total})...")
+
+    if not enriched:
+        return results
+    out = list(results)
+    for index, result in enriched.items():
+        out[index] = result
+    return out
 
 
 # ---------------------------- formatting helpers -------------------------- #
