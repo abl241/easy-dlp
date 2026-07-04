@@ -370,6 +370,7 @@ class JobQueue:
                 videos_only=bool(params.get("videos_only", True)),
                 audio_only=bool(params.get("audio_only", False)),
                 use_youtube_music=bool(params.get("use_youtube_music", False)),
+                enrich_from=int(params.get("already_loaded", 0)),
             )
             job.result = results
 

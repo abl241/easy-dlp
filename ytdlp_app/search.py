@@ -22,6 +22,35 @@ ProgressFn = Callable[[str], None]
 _URL_RE = re.compile(r"^\s*https?://", re.IGNORECASE)
 
 
+class _SilentLogger:
+    """Swallow yt-dlp log output (used for background metadata lookups)."""
+
+    def debug(self, msg: str) -> None:
+        pass
+
+    def info(self, msg: str) -> None:
+        pass
+
+    def warning(self, msg: str) -> None:
+        pass
+
+    def error(self, msg: str) -> None:
+        pass
+
+
+def _ytdlp_opts_base(*, cookies_path: str | None = None) -> dict[str, Any]:
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "logger": _SilentLogger(),
+        "socket_timeout": 20,
+    }
+    if cookies_path:
+        opts["cookiefile"] = cookies_path
+    return opts
+
+
 @dataclass(frozen=True)
 class SearchResult:
     url: str
@@ -67,6 +96,7 @@ def search_youtube(
     videos_only: bool = True,
     audio_only: bool = False,
     use_youtube_music: bool = False,
+    enrich_from: int = 0,
 ) -> list[SearchResult]:
     """Run a YouTube search OR resolve a single URL if `query` looks like one.
 
@@ -89,13 +119,25 @@ def search_youtube(
     if use_youtube_music:
         progress(f"Searching YouTube Music for {query!r}...")
         target = _youtube_music_search_url(query)
-        info = _extract_info(target, cookies_path=cookies_path,
-                             cancel_event=cancel_event)
+        info = _extract_info(
+            target, cookies_path=cookies_path,
+            cancel_event=cancel_event, playlist_end=raw_limit,
+        )
         results = _entries_to_results(
             info, source="search", videos_only=True,
             allow_missing_duration=True,
         )
-        results = results[: int(limit)] if len(results) > limit else results
+        results = results[:raw_limit]
+        enrich_from = max(0, min(int(enrich_from), len(results)))
+        if enrich_from > 0:
+            head = results[:enrich_from]
+            tail = _enrich_flat_results(
+                results[enrich_from:],
+                cookies_path=cookies_path,
+                cancel_event=cancel_event,
+                progress=progress,
+            )
+            return head + tail
         return _enrich_flat_results(
             results,
             cookies_path=cookies_path,
@@ -323,19 +365,17 @@ def _extract_info(
     *,
     cookies_path: str | None,
     cancel_event: threading.Event | None,
+    playlist_end: int | None = None,
 ) -> dict[str, Any]:
     """Call yt-dlp's extract_info with sane options for cheap metadata."""
-    opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
+    opts = _ytdlp_opts_base(cookies_path=cookies_path)
+    opts.update({
         "extract_flat": "in_playlist",   # don't hit per-video pages
         "ignoreerrors": True,
         "noplaylist": False,
-        "socket_timeout": 20,
-    }
-    if cookies_path:
-        opts["cookiefile"] = cookies_path
+    })
+    if playlist_end is not None and playlist_end > 0:
+        opts["playlistend"] = int(playlist_end)
 
     # We can't really cancel mid-yt-dlp-call without a thread to monitor, so
     # this is best-effort: a cancel_event set BEFORE the call short-circuits,
@@ -628,20 +668,19 @@ def _extract_flat_video_info(
     cookies_path: str | None,
 ) -> dict[str, Any]:
     """Lightweight per-video metadata fetch (artist, thumb, duration)."""
-    opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
+    opts = _ytdlp_opts_base(cookies_path=cookies_path)
+    opts.update({
         "extract_flat": True,
+        "ignoreerrors": True,
         "socket_timeout": 15,
-    }
-    if cookies_path:
-        opts["cookiefile"] = cookies_path
+    })
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False) or {}
         return info if isinstance(info, dict) else {}
+    except yt_dlp.utils.DownloadError:
+        return {}
     except Exception:  # noqa: BLE001
         return {}
 

@@ -181,6 +181,9 @@ class App(ctk.CTk):
         self._music_search_audio_only: bool = bool(
             self.settings.get("music_search_audio_only"),
         )
+        self._music_use_youtube_music: bool = bool(
+            self.settings.get("music_use_youtube_music"),
+        )
         self._music_loading_more_label: ctk.CTkLabel | None = None
         self._music_alternate_open_index: int | None = None
         self._music_alternate_panels: dict[int, "_MusicAlternatePanel"] = {}
@@ -1996,6 +1999,27 @@ class App(ctk.CTk):
 
     # ====================== Infinite scroll =================================
 
+    def _scroll_frame_near_bottom(
+        self,
+        scroll_frame: ctk.CTkScrollableFrame,
+        *,
+        item_count: int,
+        page_size: int,
+    ) -> bool:
+        """True when the user has scrolled near the end, or all items are visible."""
+        try:
+            canvas = scroll_frame._parent_canvas  # noqa: SLF001
+            inner = scroll_frame._parent_frame  # noqa: SLF001
+            canvas.update_idletasks()
+            _top, bottom = canvas.yview()
+            view_h = canvas.winfo_height()
+            inner_h = inner.winfo_reqheight()
+            if inner_h <= view_h + 4:
+                return item_count >= page_size
+            return bottom >= 0.90
+        except (AttributeError, ValueError, Exception):  # noqa: BLE001
+            return False
+
     def _poll_scroll_bottom(self) -> None:
         """Detect when the user has scrolled near the bottom of results
         and kick off a `search_more` job to append the next page."""
@@ -2007,22 +2031,25 @@ class App(ctk.CTk):
                     and not self._search_more_exhausted
                     and self.results
                 ):
-                    canvas = self.results_frame._parent_canvas  # noqa: SLF001
-                    top, bottom = canvas.yview()
-                    content_overflows = (bottom - top) < 0.999
-                    if content_overflows and bottom >= 0.95:
+                    if self._scroll_frame_near_bottom(
+                        self.results_frame,
+                        item_count=len(self.results),
+                        page_size=self._search_page_size,
+                    ):
                         self._load_more_results()
             elif self.tabs.get() == "Music":
                 if (
-                    self._music_search_query
+                    not self._music_showing_tracks
+                    and self._music_search_query
                     and not self._music_search_loading_more
                     and not self._music_search_more_exhausted
                     and self.music_results
                 ):
-                    canvas = self.music_results_frame._parent_canvas  # noqa: SLF001
-                    top, bottom = canvas.yview()
-                    content_overflows = (bottom - top) < 0.999
-                    if content_overflows and bottom >= 0.95:
+                    if self._scroll_frame_near_bottom(
+                        self.music_results_frame,
+                        item_count=len(self.music_results),
+                        page_size=self._music_search_page_size,
+                    ):
                         self._music_load_more_results()
         except (AttributeError, ValueError):
             pass

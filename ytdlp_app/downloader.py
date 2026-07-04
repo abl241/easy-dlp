@@ -20,6 +20,7 @@ import yt_dlp
 from .metadata.itunes import ITunesTrack, search_track
 from .metadata.parse import parse_youtube_track, sanitize_filename
 from .runtime import ffmpeg_dir
+from .search import _ytdlp_opts_base
 
 
 ProgressFn = Callable[[str], None]
@@ -336,22 +337,21 @@ def _peek_video_info(
 ) -> dict[str, Any]:
     if cancel_event is not None and cancel_event.is_set():
         return {}
-    opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
+    opts = _ytdlp_opts_base(cookies_path=cookies_path)
+    opts.update({
         "noplaylist": True,
+        "ignoreerrors": True,
         "socket_timeout": 20,
-    }
+    })
     fd = ffmpeg_dir()
     if fd:
         opts["ffmpeg_location"] = fd
-    if cookies_path and Path(cookies_path).is_file():
-        opts["cookiefile"] = cookies_path
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False) or {}
-    except (yt_dlp.utils.DownloadError, Exception):  # noqa: BLE001
+    except yt_dlp.utils.DownloadError:
+        return {}
+    except Exception:  # noqa: BLE001
         return {}
     return info if isinstance(info, dict) else {}
 
