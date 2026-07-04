@@ -181,6 +181,9 @@ class App(ctk.CTk):
         self._music_search_audio_only: bool = bool(
             self.settings.get("music_search_audio_only"),
         )
+        self._music_use_youtube_music: bool = bool(
+            self.settings.get("music_use_youtube_music"),
+        )
         self._music_loading_more_label: ctk.CTkLabel | None = None
         self._music_alternate_open_index: int | None = None
         self._music_alternate_panels: dict[int, "_MusicAlternatePanel"] = {}
@@ -400,7 +403,129 @@ class App(ctk.CTk):
 
     # ------------------------- Music tab ------------------------------------
 
+    def _create_music_option_vars(self) -> None:
+        """BooleanVars shared between the Music tab and Settings."""
+        if getattr(self, "_music_option_vars_ready", False):
+            return
+        self._music_option_vars_ready = True
+
+        self.music_lyrics_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_download_lyrics")),
+        )
+        self.music_prefer_audio_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_prefer_audio")),
+        )
+        self.music_search_audio_only_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_search_audio_only")),
+        )
+        self.music_use_youtube_music_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_use_youtube_music")),
+        )
+        self.music_skip_duplicates_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_skip_duplicates")),
+        )
+        if sys.platform == "darwin":
+            self.music_add_to_apple_music_var = ctk.BooleanVar(
+                value=bool(self.settings.get("music_add_to_apple_music")),
+            )
+            self.music_apple_music_only_var = ctk.BooleanVar(
+                value=bool(self.settings.get("music_apple_music_only")),
+            )
+            if self.music_apple_music_only_var.get():
+                self.music_add_to_apple_music_var.set(True)
+
+    def _music_search_job_params(self) -> dict[str, bool]:
+        use_ytm = bool(self.music_use_youtube_music_var.get())
+        return {
+            "use_youtube_music": use_ytm,
+            "audio_only": (
+                False if use_ytm
+                else bool(self.music_search_audio_only_var.get())
+            ),
+        }
+
+    def _on_music_use_youtube_music_change(self) -> None:
+        self.settings.set(
+            "music_use_youtube_music", self.music_use_youtube_music_var.get(),
+        )
+        self._update_music_search_audio_state()
+
+    def _update_music_search_audio_state(self) -> None:
+        cb = getattr(self, "_music_search_audio_only_cb", None)
+        if cb is None:
+            return
+        if self.music_use_youtube_music_var.get():
+            cb.configure(state="disabled")
+        else:
+            cb.configure(state="normal")
+
+    def _build_music_settings_options(self, parent: ctk.CTkFrame) -> None:
+        """Music download/search options shown on the Settings tab."""
+        if getattr(self, "_music_settings_options_built", False):
+            return
+        self._music_settings_options_built = True
+        self._create_music_option_vars()
+
+        def opt_row(**kwargs) -> ctk.CTkFrame:
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=4)
+            return row
+
+        row = opt_row()
+        ctk.CTkCheckBox(
+            row,
+            text="Download lyrics",
+            variable=self.music_lyrics_var,
+            command=lambda: self.settings.set(
+                "music_download_lyrics", self.music_lyrics_var.get(),
+            ),
+        ).pack(anchor="w")
+
+        row = opt_row()
+        ctk.CTkCheckBox(
+            row,
+            text="Prefer audio when downloading regular YouTube links",
+            variable=self.music_prefer_audio_var,
+            command=lambda: self.settings.set(
+                "music_prefer_audio", self.music_prefer_audio_var.get(),
+            ),
+        ).pack(anchor="w")
+
+        row = opt_row()
+        self._music_search_audio_only_cb = ctk.CTkCheckBox(
+            row,
+            text="Prefer audio in search (regular YouTube only)",
+            variable=self.music_search_audio_only_var,
+            command=lambda: self.settings.set(
+                "music_search_audio_only", self.music_search_audio_only_var.get(),
+            ),
+        )
+        self._music_search_audio_only_cb.pack(anchor="w")
+
+        if sys.platform == "darwin":
+            row = opt_row()
+            self._music_apple_music_only_cb = ctk.CTkCheckBox(
+                row,
+                text="Apple Music only (delete MP3 after import)",
+                variable=self.music_apple_music_only_var,
+                command=self._on_apple_music_only_change,
+            )
+            self._music_apple_music_only_cb.pack(anchor="w")
+            if not self.music_add_to_apple_music_var.get():
+                self._music_apple_music_only_cb.configure(state="disabled")
+
+        ctk.CTkLabel(
+            parent,
+            text=("Lyrics and prefer-audio options apply when downloading. "
+                  "Search prefer-audio is disabled while YouTube Music search "
+                  "is on (Music tab)."),
+            text_color=("gray40", "gray70"), wraplength=820, justify="left",
+        ).pack(fill="x", padx=14, pady=(0, 8), anchor="w")
+
+        self._update_music_search_audio_state()
+
     def _build_music_tab(self, parent) -> None:
+        self._create_music_option_vars()
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=0)
         parent.grid_rowconfigure(1, weight=0)
@@ -413,33 +538,13 @@ class App(ctk.CTk):
             font=ctk.CTkFont(weight="bold"),
         ).pack(side="left", padx=(10, 8), pady=6)
 
-        self.music_lyrics_var = ctk.BooleanVar(
-            value=bool(self.settings.get("music_download_lyrics")),
-        )
         ctk.CTkCheckBox(
             opts_frame,
-            text="Download lyrics",
-            variable=self.music_lyrics_var,
-            command=lambda: self.settings.set(
-                "music_download_lyrics", self.music_lyrics_var.get(),
-            ),
+            text="Use YouTube Music",
+            variable=self.music_use_youtube_music_var,
+            command=self._on_music_use_youtube_music_change,
         ).pack(side="left", padx=8, pady=6)
 
-        self.music_prefer_audio_var = ctk.BooleanVar(
-            value=bool(self.settings.get("music_prefer_audio")),
-        )
-        ctk.CTkCheckBox(
-            opts_frame,
-            text="Prefer audio",
-            variable=self.music_prefer_audio_var,
-            command=lambda: self.settings.set(
-                "music_prefer_audio", self.music_prefer_audio_var.get(),
-            ),
-        ).pack(side="left", padx=8, pady=6)
-
-        self.music_skip_duplicates_var = ctk.BooleanVar(
-            value=bool(self.settings.get("music_skip_duplicates")),
-        )
         ctk.CTkCheckBox(
             opts_frame,
             text="Skip duplicates",
@@ -450,30 +555,12 @@ class App(ctk.CTk):
         ).pack(side="left", padx=8, pady=6)
 
         if sys.platform == "darwin":
-            self.music_add_to_apple_music_var = ctk.BooleanVar(
-                value=bool(self.settings.get("music_add_to_apple_music")),
-            )
             ctk.CTkCheckBox(
                 opts_frame,
                 text="Add to Apple Music",
                 variable=self.music_add_to_apple_music_var,
                 command=self._on_add_to_apple_music_change,
             ).pack(side="left", padx=8, pady=6)
-
-            self.music_apple_music_only_var = ctk.BooleanVar(
-                value=bool(self.settings.get("music_apple_music_only")),
-            )
-            self._music_apple_music_only_cb = ctk.CTkCheckBox(
-                opts_frame,
-                text="Apple Music only",
-                variable=self.music_apple_music_only_var,
-                command=self._on_apple_music_only_change,
-            )
-            self._music_apple_music_only_cb.pack(side="left", padx=8, pady=6)
-            if self.music_apple_music_only_var.get():
-                self.music_add_to_apple_music_var.set(True)
-            if not self.music_add_to_apple_music_var.get():
-                self._music_apple_music_only_cb.configure(state="disabled")
 
         ctk.CTkLabel(
             opts_frame,
@@ -482,7 +569,7 @@ class App(ctk.CTk):
         ).pack(side="left", padx=(4, 8), pady=6)
 
         ctk.CTkButton(
-            opts_frame, text="Output folder…", width=140,
+            opts_frame, text="Music settings…", width=130,
             fg_color="transparent", border_width=1,
             command=lambda: self.tabs.set("Settings"),
         ).pack(side="right", padx=10, pady=6)
@@ -580,23 +667,10 @@ class App(ctk.CTk):
             command=self._on_music_limit_change,
         ).pack(side="left", padx=2)
 
-        filt_row = ctk.CTkFrame(parent, fg_color="transparent")
-        filt_row.pack(fill="x", padx=8, pady=(0, 2))
-        self.music_search_audio_only_var = ctk.BooleanVar(
-            value=bool(self.settings.get("music_search_audio_only")),
-        )
-        ctk.CTkCheckBox(
-            filt_row,
-            text="Prefer audio (skip music videos & lives)",
-            variable=self.music_search_audio_only_var,
-            command=lambda: self.settings.set(
-                "music_search_audio_only", self.music_search_audio_only_var.get(),
-            ),
-        ).pack(side="left", padx=6)
-
         hint = ctk.CTkLabel(
             parent,
-            text="Scroll to the bottom of the results for more.",
+            text=("YouTube Music search returns songs from the music catalog. "
+                  "Scroll to the bottom of the results for more."),
             text_color=("gray40", "gray70"),
             anchor="w",
         )
@@ -887,7 +961,8 @@ class App(ctk.CTk):
             text=("Downloads MP3 files named by track title. Artist, album, "
                   "cover art, and lyrics are written into file metadata."),
             text_color=("gray40", "gray70"), wraplength=820, justify="left",
-        ).pack(fill="x", padx=14, pady=(0, 8), anchor="w")
+        ).pack(fill="x", padx=14, pady=(0, 4), anchor="w")
+        self._build_music_settings_options(s_music)
 
         # Cookies
         s_cookies = section("Cookies (optional)")
@@ -1144,9 +1219,9 @@ class App(ctk.CTk):
         if not enabled:
             self.music_apple_music_only_var.set(False)
             self.settings.set("music_apple_music_only", False)
-        self._music_apple_music_only_cb.configure(
-            state="normal" if enabled else "disabled",
-        )
+        cb = getattr(self, "_music_apple_music_only_cb", None)
+        if cb is not None:
+            cb.configure(state="normal" if enabled else "disabled")
 
     def _on_apple_music_only_change(self) -> None:
         only = bool(self.music_apple_music_only_var.get())
@@ -1391,7 +1466,9 @@ class App(ctk.CTk):
         self._music_search_more_exhausted = False
         self._music_search_page_size = max(10, limit)
         self._music_pending_search_query = query if not is_url(query) else None
-        self._music_search_audio_only = bool(self.music_search_audio_only_var.get())
+        search_params = self._music_search_job_params()
+        self._music_search_audio_only = search_params["audio_only"]
+        self._music_use_youtube_music = search_params["use_youtube_music"]
         self.music_tracks = []
         self._music_showing_tracks = False
         label = f"Music search: {query[:60]}"
@@ -1400,8 +1477,8 @@ class App(ctk.CTk):
             query=query, limit=limit,
             cookies_path=cookies,
             videos_only=True,
-            audio_only=self._music_search_audio_only,
             results_context="music",
+            **search_params,
         )
 
     def _do_resolve(self) -> None:
@@ -1675,6 +1752,7 @@ class App(ctk.CTk):
             tracks=[t.to_dict() for t in self.music_tracks],
             cookies_path=cookies,
             results_context="music",
+            **self._music_search_job_params(),
         )
 
     def _music_enqueue_matched_downloads(self, out_dir: str) -> None:
@@ -1713,6 +1791,7 @@ class App(ctk.CTk):
                     cookies_path=cookies,
                     results_context="music",
                     auto_download=True,
+                    **self._music_search_job_params(),
                 )
                 return
             if not downloadable:
@@ -1899,9 +1978,9 @@ class App(ctk.CTk):
             limit=15,
             cookies_path=cookies,
             videos_only=True,
-            audio_only=bool(self.music_search_audio_only_var.get()),
             results_context=ctx,
             track_index=index,
+            **self._music_search_job_params(),
         )
 
     def _music_clear_results(self) -> None:
@@ -1920,6 +1999,27 @@ class App(ctk.CTk):
 
     # ====================== Infinite scroll =================================
 
+    def _scroll_frame_near_bottom(
+        self,
+        scroll_frame: ctk.CTkScrollableFrame,
+        *,
+        item_count: int,
+        page_size: int,
+    ) -> bool:
+        """True when the user has scrolled near the end, or all items are visible."""
+        try:
+            canvas = scroll_frame._parent_canvas  # noqa: SLF001
+            inner = scroll_frame._parent_frame  # noqa: SLF001
+            canvas.update_idletasks()
+            _top, bottom = canvas.yview()
+            view_h = canvas.winfo_height()
+            inner_h = inner.winfo_reqheight()
+            if inner_h <= view_h + 4:
+                return item_count >= page_size
+            return bottom >= 0.90
+        except (AttributeError, ValueError, Exception):  # noqa: BLE001
+            return False
+
     def _poll_scroll_bottom(self) -> None:
         """Detect when the user has scrolled near the bottom of results
         and kick off a `search_more` job to append the next page."""
@@ -1931,22 +2031,25 @@ class App(ctk.CTk):
                     and not self._search_more_exhausted
                     and self.results
                 ):
-                    canvas = self.results_frame._parent_canvas  # noqa: SLF001
-                    top, bottom = canvas.yview()
-                    content_overflows = (bottom - top) < 0.999
-                    if content_overflows and bottom >= 0.95:
+                    if self._scroll_frame_near_bottom(
+                        self.results_frame,
+                        item_count=len(self.results),
+                        page_size=self._search_page_size,
+                    ):
                         self._load_more_results()
             elif self.tabs.get() == "Music":
                 if (
-                    self._music_search_query
+                    not self._music_showing_tracks
+                    and self._music_search_query
                     and not self._music_search_loading_more
                     and not self._music_search_more_exhausted
                     and self.music_results
                 ):
-                    canvas = self.music_results_frame._parent_canvas  # noqa: SLF001
-                    top, bottom = canvas.yview()
-                    content_overflows = (bottom - top) < 0.999
-                    if content_overflows and bottom >= 0.95:
+                    if self._scroll_frame_near_bottom(
+                        self.music_results_frame,
+                        item_count=len(self.music_results),
+                        page_size=self._music_search_page_size,
+                    ):
                         self._music_load_more_results()
         except (AttributeError, ValueError):
             pass
@@ -1991,8 +2094,9 @@ class App(ctk.CTk):
             already_loaded=already_loaded,
             cookies_path=cookies,
             videos_only=True,
-            audio_only=self._music_search_audio_only,
             results_context="music",
+            audio_only=self._music_search_audio_only,
+            use_youtube_music=getattr(self, "_music_use_youtube_music", False),
         )
 
     def _show_loading_indicator(self, text: str) -> None:
@@ -2203,6 +2307,7 @@ class App(ctk.CTk):
                             cookies_path=cookies,
                             results_context="music",
                             auto_download=True,
+                            **self._music_search_job_params(),
                         )
                 elif job.state == FAILED:
                     self._music_auto_download = False

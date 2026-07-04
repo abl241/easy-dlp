@@ -369,6 +369,8 @@ class JobQueue:
                 progress=log,
                 videos_only=bool(params.get("videos_only", True)),
                 audio_only=bool(params.get("audio_only", False)),
+                use_youtube_music=bool(params.get("use_youtube_music", False)),
+                enrich_from=int(params.get("already_loaded", 0)),
             )
             job.result = results
 
@@ -420,6 +422,8 @@ class JobQueue:
                     cookies_path=cookies,
                     cancel_event=job.cancel_event,
                     progress=log,
+                    use_youtube_music=bool(params.get("use_youtube_music", False)),
+                    audio_only=bool(params.get("audio_only", True)),
                 )
                 matched.append(track.with_match(result))
             job.result = matched
