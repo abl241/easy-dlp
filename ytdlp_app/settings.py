@@ -45,11 +45,16 @@ _DEFAULTS: dict[str, Any] = {
     "music_dir": str(Path.home() / "Music"),
     "music_search_query": "",
     "music_paste_urls": "",
+    "music_paste_platform": "youtube",
+    "music_track_list": "",
     "music_source_tab": "search",    # "search" or "paste"
     "music_search_limit": 20,        # 10 | 20 | 50
     "music_download_lyrics": True,
     "music_prefer_audio": True,
     "music_search_audio_only": True,
+    "music_skip_duplicates": False,
+    "music_add_to_apple_music": False,
+    "music_apple_music_only": False,
 
     # Combined download tab state
     "paste_urls": "",
@@ -62,8 +67,15 @@ _DEFAULTS: dict[str, Any] = {
 
     # UI collapse state
     "panel_active_collapsed": False,
-    "panel_recent_collapsed": False,
-    "panel_log_collapsed": False,
+    "panel_recent_collapsed": True,
+    "panel_log_collapsed": True,
+    "download_input_collapsed": False,
+    "music_input_collapsed": False,
+    "music_track_list_expanded": False,
+
+    # Main window size (restored on launch)
+    "window_width": 1100,
+    "window_height": 960,
 
     # Default format selection on launch
     "default_audio": True,

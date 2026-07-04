@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mutagen.id3 import APIC, ID3, TALB, TCON, TDRC, TIT2, TPE1, TRCK, USLT, ID3NoHeaderError
+from mutagen.id3 import APIC, ID3, TALB, TCON, TDRC, TIT2, TPE1, TPOS, TRCK, USLT, ID3NoHeaderError
 from mutagen.mp3 import MP3
 
 from .itunes import ITunesTrack
@@ -59,7 +59,7 @@ def apply_itunes_tags(
         audio.add_tags()
 
     tags = audio.tags
-    _clear_frames(tags, "TIT2", "TPE1", "TALB", "TDRC", "TCON", "TRCK", "USLT")
+    _clear_frames(tags, "TIT2", "TPE1", "TALB", "TDRC", "TCON", "TRCK", "TPOS", "USLT")
 
     tags["TIT2"] = TIT2(encoding=3, text=track.title)
     tags["TPE1"] = TPE1(encoding=3, text=track.artist)
@@ -70,8 +70,10 @@ def apply_itunes_tags(
     if track.genre:
         tags["TCON"] = TCON(encoding=3, text=track.genre)
     if track.track_number:
-        disc = f"{track.disc_number}/" if track.disc_number else ""
-        tags["TRCK"] = TRCK(encoding=3, text=f"{disc}{track.track_number}")
+        # TRCK is "track" or "track/total" — not "disc/track".
+        tags["TRCK"] = TRCK(encoding=3, text=str(track.track_number))
+    if track.disc_number:
+        tags["TPOS"] = TPOS(encoding=3, text=str(track.disc_number))
 
     if artwork:
         _set_cover_art(tags, artwork)

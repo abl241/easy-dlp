@@ -101,14 +101,21 @@ def find_preferred_audio_url(
     cookies_path: str | None = None,
     cancel_event: threading.Event | None = None,
     progress: ProgressFn = lambda msg: None,
+    expected_artist: str | None = None,
+    expected_title: str | None = None,
+    expected_duration_s: int | None = None,
 ) -> str:
     """Search YouTube for an official-audio upload; fall back to `original.url`."""
-    if _is_already_preferred_audio(original):
+    if _is_already_preferred_audio(original) and not (expected_artist or expected_title):
         return original.url
 
-    from .metadata.parse import parse_youtube_track
+    from .metadata.parse import ParsedTrack, parse_youtube_track
 
-    parsed = parse_youtube_track(original.title, original.uploader)
+    if expected_artist or expected_title:
+        parsed = ParsedTrack(artist=expected_artist or "", title=expected_title or "")
+    else:
+        parsed = parse_youtube_track(original.title, original.uploader)
+
     query = " ".join(x for x in (parsed.artist, parsed.title) if x).strip()
     if not query:
         query = original.title
@@ -124,16 +131,97 @@ def find_preferred_audio_url(
         audio_only=True,
     )
     if not candidates:
-        progress("[music] no audio alternative — using original link")
+        progress("[music] no audio alternative — searching any upload…")
+        candidates = search_youtube(
+            query,
+            limit=10,
+            cookies_path=cookies_path,
+            cancel_event=cancel_event,
+            progress=progress,
+            videos_only=True,
+            audio_only=False,
+        )
+    if not candidates:
+        progress("[music] no alternative — using original link")
         return original.url
 
-    best = _pick_best_audio_candidate(candidates, original, parsed)
+    ref_duration = expected_duration_s or original.duration_s
+    best = _pick_best_audio_candidate(
+        candidates, original, parsed, expected_duration_s=ref_duration,
+    )
+    if best is None and not _is_already_preferred_audio(original):
+        best = _pick_best_audio_candidate(
+            candidates, original, parsed,
+            expected_duration_s=ref_duration, min_score=0.45,
+        )
     if best is not None and best.url != original.url:
         progress(f"[music] using audio: {best.display_title(70)}")
         return best.url
 
     progress("[music] no better audio — using original link")
     return original.url
+
+
+def find_youtube_match_for_track(
+    artist: str,
+    title: str,
+    duration_s: int | None = None,
+    *,
+    cookies_path: str | None = None,
+    cancel_event: threading.Event | None = None,
+    progress: ProgressFn = lambda msg: None,
+) -> SearchResult | None:
+    """Search YouTube for the best match for a known track.
+
+    Tries audio-first uploads (Topic channels, official audio), then falls
+    back to music videos / any matching upload if nothing passes scoring.
+    """
+    from .metadata.parse import ParsedTrack
+
+    query = " ".join(x for x in (artist, title) if x).strip()
+    if not query:
+        return None
+
+    stub = SearchResult(
+        url="",
+        title=title,
+        uploader=artist,
+        duration_s=duration_s,
+        view_count=None,
+        upload_date=None,
+        thumbnail_url=None,
+    )
+    parsed = ParsedTrack(artist=artist, title=title)
+
+    for audio_only in (True, False):
+        label = "audio" if audio_only else "any upload"
+        progress(f"Searching YouTube ({label}) for {query!r}...")
+        candidates = search_youtube(
+            query,
+            limit=10,
+            cookies_path=cookies_path,
+            cancel_event=cancel_event,
+            progress=progress,
+            videos_only=True,
+            audio_only=audio_only,
+        )
+        if not candidates:
+            if audio_only:
+                progress("No audio uploads found — trying music videos…")
+            continue
+        min_score = 0.55 if audio_only else 0.45
+        best = _pick_best_audio_candidate(
+            candidates, stub, parsed,
+            expected_duration_s=duration_s,
+            min_score=min_score,
+        )
+        if best is not None:
+            if not audio_only:
+                progress(f"Using music video: {best.display_title(70)}")
+            return best
+        if audio_only:
+            progress("No confident audio match — trying music videos…")
+    return None
 
 
 def resolve_urls(
@@ -311,15 +399,20 @@ def _pick_best_audio_candidate(
     candidates: list[SearchResult],
     original: SearchResult,
     parsed: Any,
+    *,
+    expected_duration_s: int | None = None,
+    min_score: float = 0.55,
 ) -> SearchResult | None:
     best: SearchResult | None = None
     best_score = 0.0
     for c in candidates:
-        score = _score_audio_candidate(c, parsed, original)
+        score = _score_audio_candidate(
+            c, parsed, original, expected_duration_s=expected_duration_s,
+        )
         if score > best_score:
             best_score = score
             best = c
-    if best_score < 0.55:
+    if best_score < min_score:
         return None
     return best
 
@@ -328,8 +421,13 @@ def _score_audio_candidate(
     candidate: SearchResult,
     parsed: Any,
     original: SearchResult,
+    *,
+    expected_duration_s: int | None = None,
 ) -> float:
-    title_score = _token_overlap(candidate.title, parsed.title or original.title)
+    compare_title = candidate.title
+    if parsed.artist:
+        compare_title = _strip_leading_artist(compare_title, parsed.artist)
+    title_score = _token_overlap(compare_title, parsed.title or original.title)
     artist_score = (
         _artist_overlap(candidate.uploader, parsed.artist)
         if parsed.artist
@@ -345,8 +443,9 @@ def _score_audio_candidate(
         score += 0.15
     if _AUDIO_HINT_RE.search(candidate.title):
         score += 0.05
-    if original.duration_s and candidate.duration_s:
-        delta = abs(original.duration_s - candidate.duration_s)
+    ref_duration = expected_duration_s or original.duration_s
+    if ref_duration and candidate.duration_s:
+        delta = abs(ref_duration - candidate.duration_s)
         if delta <= 3:
             score += 0.15
         elif delta <= 8:
@@ -354,6 +453,19 @@ def _score_audio_candidate(
         elif delta > 25:
             score -= 0.25
     return max(0.0, min(1.0, score))
+
+
+def _strip_leading_artist(title: str, artist: str) -> str:
+    """Drop a leading 'Artist - Title' prefix common on YouTube uploads."""
+    if not artist or not title:
+        return title
+    title_l = title.lower()
+    artist_l = artist.lower()
+    for sep in (" - ", " – ", " — ", " | ", ": "):
+        prefix = artist_l + sep
+        if title_l.startswith(prefix):
+            return title[len(artist) + len(sep) :]
+    return title
 
 
 def _token_overlap(a: str, b: str) -> float:

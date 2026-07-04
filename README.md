@@ -2,7 +2,7 @@
 
 # easy-dlp
 
-### A modern desktop app for searching, downloading, and tagging YouTube content — no terminal required.
+### A modern desktop app for searching, downloading, and tagging music from YouTube and Spotify — no terminal required.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![yt-dlp](https://img.shields.io/badge/powered%20by-yt--dlp-red.svg)](https://github.com/yt-dlp/yt-dlp)
@@ -200,7 +200,7 @@ On first run, `run.sh` automatically:
 
 1. Finds Python 3.10+ with tkinter
 2. Creates a `.venv` folder
-3. Installs `yt-dlp`, `customtkinter`, `Pillow`, and `mutagen`
+3. Installs `yt-dlp`, `customtkinter`, `Pillow`, `mutagen`, and `spotifyscraper`
 4. Opens the GUI
 
 <br>
@@ -283,7 +283,7 @@ A purpose-built workflow for building a proper music library — not just raw do
 <p align="center">
   <img src="docs/screenshots/03-music-tab.png" alt="Music tab" width="900" />
 </p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/03-music-tab.png</code> — Music tab with search, Prefer audio, and Download lyrics toggles</em></p>
+<p align="center"><em>↑ Screenshot: <code>docs/screenshots/03-music-tab.png</code> — Music tab with search, Prefer audio, Download lyrics, and Apple Music toggles</em></p>
 
 <br>
 
@@ -312,15 +312,65 @@ Toggle **Download lyrics** to fetch synced `.lrc` lyrics and embed them in the M
 
 ### Prefer audio
 
-When enabled, easy-dlp searches YouTube for an **official-audio upload** or **Topic channel** version instead of downloading a music video. It scores candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics — falling back to the original link if nothing better is found.
+When enabled, easy-dlp searches YouTube for an **official-audio upload** or **Topic channel** version instead of downloading a music video. It scores candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics. If no audio upload matches, it **falls back to a music video** rather than skipping the track.
 
 ### Audio-only search filter
 
 An optional filter hides music videos and live performances from Music search results, surfacing uploads that are already audio-first.
 
+### Alternate YouTube match
+
+Every search result and every matched Spotify/imported track has a **Change** button. Click it to run a fresh YouTube search for that song and pick a different upload — useful when the first match is a music video, a live version, or the wrong recording. The picker excludes the current video and lets you edit the search query before re-searching.
+
+### Add to Apple Music (macOS)
+
+Two optional checkboxes on the Music tab integrate with the **Music** app after tagging:
+
+| Checkbox | What it does |
+|:---|:---|
+| **Add to Apple Music** | Imports the finished MP3 into your Music library via AppleScript (falls back to the **Automatically Add to Music** folder). Your configured output folder keeps a copy. |
+| **Apple Music only** | Same import, then **deletes the local copy** from your output folder so the track lives only in Apple Music. Requires **Add to Apple Music**. Works best when Music → Settings → Files has **Copy files to Music Media folder when adding to library** enabled. |
+
+On first use, macOS may ask for permission to let easy-dlp control the Music app (System Settings → Privacy & Security → Automation).
+
+### Skip duplicates
+
+When enabled, easy-dlp checks your music output folder before downloading and offers to skip tracks that already exist there (by predicted filename).
+
 ### Search or paste
 
-Music mode mirrors the Download tab's workflow — search by song name or paste URLs directly. Playlists expand into individual tracks.
+Music mode has two input paths:
+
+| Sub-tab | Use for |
+|:---|:---|
+| **Search YouTube** | Find songs by name (same as Download tab, with music-specific filters) |
+| **Paste Link** | Paste a playlist, album, or track URL from an external platform |
+
+On **Paste Link**, pick a **Source** from the dropdown:
+
+| Source | What happens |
+|:---|:---|
+| **YouTube** | Playlists and channels expand into individual videos with direct download URLs |
+| **Spotify** | Public playlists, albums, and tracks resolve to a track list; you then match each song on YouTube |
+
+The source dropdown is designed to grow — Apple Music and other platforms can be added behind the same UI.
+
+### Spotify playlists (no Premium or API key required)
+
+Import a Spotify playlist or album, preview the track list, match on YouTube, and download tagged MP3s:
+
+1. Open **Music → Paste Link**
+2. Set **Source** to **Spotify**
+3. Paste a public playlist, album, or track URL (one per line)
+4. Click **Resolve & Pick** to load tracks from Spotify
+5. Click **Match on YouTube** to find a YouTube upload for each track
+6. Click **Download all**
+
+**Shortcut:** **Download all immediately** runs resolve → match → download in one flow.
+
+**Fallback:** If Spotify resolution fails, paste an `Artist - Title` list (one per line) in the text box below the URL field.
+
+Spotify-sourced **album name**, **track number**, and **disc number** are preserved through download and written to ID3 tags (overriding per-song iTunes guesses when needed).
 
 <br>
 
@@ -429,10 +479,10 @@ On macOS, easy-dlp reads your system's Natural Scrolling preference. You can als
 
 1. Launch with `./run.sh`
 2. Pick a tab — **Download**, **Music**, or **Embed Thumbnail**
-3. Search YouTube or paste URLs
-4. Click **Download** on individual rows, or **Download all**
-5. Watch progress in **Active downloads**; finished jobs appear in **Recent jobs**
-6. Click **Open output folder** when a job completes
+3. **Download tab:** search YouTube or paste video/playlist URLs → pick formats → download
+4. **Music tab:** search YouTube, paste a YouTube link, or paste a **Spotify** playlist/album URL → match on YouTube → download tagged MP3s
+5. Click **Download** on individual rows, or **Download all**
+6. Watch progress in **Active downloads**; finished jobs appear in **Recent jobs**
 
 <br>
 
@@ -451,9 +501,18 @@ On macOS, easy-dlp reads your system's Natural Scrolling preference. You can als
 
 ## Music tab
 
+### YouTube (search or paste)
+
 1. Toggle **Download lyrics** and **Prefer audio** as needed
-2. Search for a song or paste a URL
+2. **Search YouTube** for a song, or **Paste Link** with Source set to **YouTube**
 3. Download — MP3s arrive with full tags, cover art, and optional lyrics
+
+### Spotify playlist or album
+
+1. Open **Paste Link** and set **Source** to **Spotify**
+2. Paste the Spotify URL → **Resolve & Pick**
+3. **Match on YouTube** → review results (failed rows can be retried)
+4. **Download all** — files land in your music output folder with correct track numbers and album art
 
 ## Cookies (optional)
 
@@ -475,6 +534,7 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 | customtkinter | Installed automatically by `run.sh` |
 | Pillow | Installed automatically by `run.sh` |
 | mutagen | Installed automatically by `run.sh` |
+| spotifyscraper | Installed automatically by `run.sh`; reads public Spotify pages (no API key) |
 
 <br>
 
@@ -492,6 +552,9 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 | Blank window on launch | Python may lack tkinter — run `./run.sh --doctor` |
 | Age-restricted video fails | Add a cookies file in Settings |
 | Stale yt-dlp / broken downloads | Run `./run.sh --update` or `./run.sh --reset` |
+| Spotify playlist won't resolve | Playlist may be private; use the `Artist - Title` text fallback instead |
+| Song shows "no YouTube match" | Click **Retry** on the row, or re-run **Match on YouTube**; obscure tracks may only exist as music videos |
+| Wrong track numbers on album | Re-download after updating — older builds wrote disc number into the wrong ID3 field |
 
 <br>
 
@@ -510,6 +573,7 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 | Metadata | mutagen | ID3 tag read/write for MP3s |
 | Images | Pillow | Thumbnail decode/resize for the UI |
 | Music data | iTunes Search API | Album art, track metadata, duration matching |
+| Playlist import | spotifyscraper | Public Spotify playlist/album metadata (no API key) |
 | Lyrics | LRCLIB | Synced lyric fetch |
 | Concurrency | `threading` + `queue` | Non-blocking UI with a worker job queue |
 | Settings | JSON on disk | Persistent, OS-appropriate config directory |
@@ -523,7 +587,9 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 |:---|:---|
 | Job queue with cancellation | Downloads, searches, and metadata enrichment as discrete job kinds with shared progress/cancel plumbing |
 | UI thread safety | Worker threads post updates through a `queue.Queue`; the main thread polls and renders |
-| Fuzzy audio matching | Music mode scores YouTube candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics |
+| Fuzzy audio matching | Music mode scores YouTube candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics — with music-video fallback |
+| Platform registry | `sources/` module resolves YouTube and Spotify URLs into a unified `MusicTrack` model; new platforms plug in behind the Paste Link dropdown |
+| Spotify → YouTube pipeline | Two-phase jobs: `source_resolve` (metadata) then `source_match_all` (YouTube search per track) before the existing music download path |
 | Infinite scroll | Search pagination tracked per-tab with exhaustion flags — no duplicate fetches |
 | macOS scroll handling | Detects Tk version and system scroll preference to avoid trackpad snap-back bugs |
 
@@ -550,6 +616,10 @@ easy-dlp/
     ├── jobs.py             # Background job queue (search / download / music)
     ├── downloader.py       # yt-dlp wrappers for audio, video, thumbs, music
     ├── search.py           # YouTube search, URL resolve, audio candidate scoring
+    ├── sources/            # Platform registry (YouTube, Spotify, …)
+    │   ├── base.py         # MusicTrack model + text fallback parser
+    │   ├── youtube.py      # YouTube URL → MusicTrack
+    │   └── spotify.py      # Spotify playlist resolve via spotifyscraper
     ├── embed.py            # ffmpeg thumbnail embedding (single + batch)
     ├── music_postprocess.py# Cover art + lyrics write-back after download
     ├── settings.py         # Persistent JSON settings store
