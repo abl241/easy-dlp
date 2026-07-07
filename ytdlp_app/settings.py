@@ -54,6 +54,7 @@ _DEFAULTS: dict[str, Any] = {
     "music_search_audio_only": True,
     "music_use_youtube_music": True,
     "music_skip_duplicates": False,
+    "music_match_quality": "balanced",  # "fast" | "balanced" | "accurate"
     "music_add_to_apple_music": False,
     "music_apple_music_only": False,
 
@@ -70,6 +71,7 @@ _DEFAULTS: dict[str, Any] = {
     "panel_active_collapsed": False,
     "panel_recent_collapsed": True,
     "panel_log_collapsed": True,
+    "panel_log_height": "normal",    # "normal" | "large" | "xlarge"
     "download_input_collapsed": False,
     "music_input_collapsed": False,
     "music_track_list_expanded": False,

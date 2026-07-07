@@ -197,13 +197,22 @@ class JobQueue:
         def on_progress(pct: float, msg: str) -> None:
             if job.cancel_event.is_set():
                 raise _Cancelled()
-            job.progress_pct = _clamp_pct(pct)
+            new_pct = _clamp_pct(pct)
+            pct_changed = abs(new_pct - job.progress_pct) >= 1.0
+            job.progress_pct = new_pct
             if msg:
-                job.progress_msg = msg
-            self._notify(job)
+                if msg != job.progress_msg:
+                    job.progress_msg = msg
+                    self._notify(job)
+            elif pct_changed:
+                self._notify(job)
 
         def log(msg: str) -> None:
-            on_progress(job.progress_pct, msg)
+            if job.cancel_event.is_set():
+                raise _Cancelled()
+            if msg != job.progress_msg:
+                job.progress_msg = msg
+                self._notify(job)
 
         params = job.params
         cookies = params.get("cookies_path") or None
@@ -397,7 +406,10 @@ class JobQueue:
             job.result = tracks
 
         elif job.kind == "source_match_all":
+            import time
+
             from . import search as se
+            from .match_config import get_match_config
             from .sources.base import MATCH_PENDING, MusicTrack
 
             raw_tracks = params.get("tracks") or []
@@ -405,8 +417,11 @@ class JobQueue:
                 t if isinstance(t, MusicTrack) else MusicTrack.from_dict(t)
                 for t in raw_tracks
             ]
+            match_quality = str(params.get("match_quality") or "balanced")
+            cfg = get_match_config(match_quality)
             total = len(tracks)
             matched: list[MusicTrack] = []
+            match_started = time.monotonic()
             for i, track in enumerate(tracks):
                 if job.cancel_event.is_set():
                     raise _Cancelled()
@@ -414,7 +429,7 @@ class JobQueue:
                     matched.append(track)
                     continue
                 label = track.display_title(50)
-                log(f"Matching {i + 1}/{total}: {label}")
+                log(f"Matching {i + 1}/{total} ({cfg.name}): {label}")
                 result = se.find_youtube_match_for_track(
                     track.artist,
                     track.title,
@@ -424,8 +439,15 @@ class JobQueue:
                     progress=log,
                     use_youtube_music=bool(params.get("use_youtube_music", False)),
                     audio_only=bool(params.get("audio_only", True)),
+                    match_quality=match_quality,
                 )
                 matched.append(track.with_match(result))
+                pending_left = total - (i + 1)
+                if pending_left > 0 and cfg.inter_track_delay_s > 0:
+                    time.sleep(cfg.inter_track_delay_s)
+            elapsed = int(time.monotonic() - match_started)
+            ok = sum(1 for t in matched if t.is_downloadable())
+            log(f"Matched {ok}/{total} in {elapsed // 60}m {elapsed % 60}s ({cfg.name})")
             job.result = matched
 
         else:

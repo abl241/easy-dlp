@@ -1,4 +1,6 @@
 yt-dlp>=2026.3.17
+yt-dlp-ejs==0.8.0
+deno>=2.6.6
 customtkinter>=5.2.2
 Pillow>=10.0.0
 mutagen>=1.47.0

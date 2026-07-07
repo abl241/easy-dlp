@@ -16,10 +16,13 @@ Layout:
 
 from __future__ import annotations
 
+import copy
 import queue
 import subprocess
 import sys
 import threading
+import time
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Any, Callable
@@ -29,14 +32,22 @@ import customtkinter as ctk
 from . import __version__, thumbcache
 from .jobs import CANCELLED, DONE, FAILED, Job, JobQueue, QUEUED, RUNNING
 from .metadata.parse import parse_youtube_track
-from .music_duplicates import basename_for_result, basename_for_track, music_exists_in_dir
+from .music_duplicates import check_music_duplicate, duplicate_location_label
 from .runtime import find_ffmpeg
 from .search import SearchResult, is_url, resolve_urls
 from .settings import Settings, _config_dir
 from .sources import PLATFORM_CONFIGS, MusicTrack, detect_platform, platform_config
-from .sources.base import MATCH_PENDING
+from .sources.base import MATCH_FAILED, MATCH_PENDING
 
 _THUMB_SIZE = (120, 68)  # 16:9 thumbnail
+
+_LOG_HEIGHTS = {"normal": 130, "large": 280, "xlarge": 450}
+_LOG_HEIGHT_CYCLE = ("normal", "large", "xlarge")
+_LOG_HEIGHT_LABELS = {
+    "normal": "Size: Normal",
+    "large": "Size: Large",
+    "xlarge": "Size: X-Large",
+}
 
 
 _FORMAT_LABELS = {
@@ -187,6 +198,14 @@ class App(ctk.CTk):
         self._music_loading_more_label: ctk.CTkLabel | None = None
         self._music_alternate_open_index: int | None = None
         self._music_alternate_panels: dict[int, "_MusicAlternatePanel"] = {}
+
+        # Log panel state
+        self._last_logged: dict[int, str] = {}
+        self._last_log_time: dict[int, float] = {}
+        self._log_popout: "_LogPopout | None" = None
+        self._log_height = str(self.settings.get("panel_log_height") or "normal")
+        if self._log_height not in _LOG_HEIGHTS:
+            self._log_height = "normal"
 
         # ----- build UI -----
         # Pack order matters: bottom widgets are packed first (innermost first
@@ -424,6 +443,13 @@ class App(ctk.CTk):
         self.music_skip_duplicates_var = ctk.BooleanVar(
             value=bool(self.settings.get("music_skip_duplicates")),
         )
+        from .match_config import match_quality_choices
+
+        _quality_labels = {k: v for k, v in match_quality_choices()}
+        _quality_key = str(self.settings.get("music_match_quality") or "balanced")
+        self.music_match_quality_var = ctk.StringVar(
+            value=_quality_labels.get(_quality_key, _quality_labels["balanced"]),
+        )
         if sys.platform == "darwin":
             self.music_add_to_apple_music_var = ctk.BooleanVar(
                 value=bool(self.settings.get("music_add_to_apple_music")),
@@ -434,7 +460,7 @@ class App(ctk.CTk):
             if self.music_apple_music_only_var.get():
                 self.music_add_to_apple_music_var.set(True)
 
-    def _music_search_job_params(self) -> dict[str, bool]:
+    def _music_search_job_params(self) -> dict:
         use_ytm = bool(self.music_use_youtube_music_var.get())
         return {
             "use_youtube_music": use_ytm,
@@ -442,7 +468,24 @@ class App(ctk.CTk):
                 False if use_ytm
                 else bool(self.music_search_audio_only_var.get())
             ),
+            "match_quality": self._match_quality_key(),
         }
+
+    def _match_quality_key(self) -> str:
+        from .match_config import match_quality_choices
+
+        label = self.music_match_quality_var.get()
+        label_to_key = {v: k for k, v in match_quality_choices()}
+        if label in label_to_key:
+            return label_to_key[label]
+        return str(self.settings.get("music_match_quality") or "balanced")
+
+    def _on_music_match_quality_change(self, value: str) -> None:
+        from .match_config import match_quality_choices
+
+        label_to_key = {v: k for k, v in match_quality_choices()}
+        key = label_to_key.get(value, "balanced")
+        self.settings.set("music_match_quality", key)
 
     def _on_music_use_youtube_music_change(self) -> None:
         self.settings.set(
@@ -502,6 +545,22 @@ class App(ctk.CTk):
         )
         self._music_search_audio_only_cb.pack(anchor="w")
 
+        row = opt_row()
+        ctk.CTkLabel(row, text="Match quality:", width=120, anchor="w").pack(
+            side="left", padx=(0, 8),
+        )
+        from .match_config import match_quality_choices
+
+        quality_labels = {k: v for k, v in match_quality_choices()}
+        ctk.CTkOptionMenu(
+            row,
+            values=[quality_labels[k] for k, _ in match_quality_choices()],
+            variable=self.music_match_quality_var,
+            width=200,
+            command=self._on_music_match_quality_change,
+        ).pack(side="left")
+        # variable already holds the display label from _create_music_option_vars
+
         if sys.platform == "darwin":
             row = opt_row()
             self._music_apple_music_only_cb = ctk.CTkCheckBox(
@@ -518,7 +577,8 @@ class App(ctk.CTk):
             parent,
             text=("Lyrics and prefer-audio options apply when downloading. "
                   "Search prefer-audio is disabled while YouTube Music search "
-                  "is on (Music tab)."),
+                  "is on (Music tab). Match quality controls playlist speed "
+                  "vs accuracy — Fast reduces YouTube requests on large playlists."),
             text_color=("gray40", "gray70"), wraplength=820, justify="left",
         ).pack(fill="x", padx=14, pady=(0, 8), anchor="w")
 
@@ -622,6 +682,20 @@ class App(ctk.CTk):
         )
         self.music_match_btn.pack(side="right", padx=2)
         self.music_match_btn.pack_forget()
+        self.music_retry_failed_btn = ctk.CTkButton(
+            header, text="Retry failed", width=110,
+            fg_color="#8b2e2e", hover_color="#a33",
+            command=self._music_retry_all_failed,
+        )
+        self.music_retry_failed_btn.pack(side="right", padx=2)
+        self.music_retry_failed_btn.pack_forget()
+        self.music_review_matches_btn = ctk.CTkButton(
+            header, text="Review matches", width=130,
+            fg_color="transparent", border_width=1,
+            command=self._music_review_matches,
+        )
+        self.music_review_matches_btn.pack(side="right", padx=2)
+        self.music_review_matches_btn.pack_forget()
         ctk.CTkButton(header, text="New link", width=80,
                       command=self._music_new_link).pack(side="right", padx=2)
         ctk.CTkButton(header, text="Clear", width=70,
@@ -1106,8 +1180,10 @@ class App(ctk.CTk):
     # ---- Heights used by the three collapsible bottom panels.
     _ACTIVE_EXPANDED_H = 150
     _RECENT_EXPANDED_H = 110
-    _LOG_EXPANDED_H = 130
     _COLLAPSED_H = 36
+
+    def _log_expanded_height(self) -> int:
+        return _LOG_HEIGHTS.get(self._log_height, _LOG_HEIGHTS["normal"])
 
     def _build_active_panel(self) -> None:
         # Fixed-height outer so an empty CTkScrollableFrame doesn't claim
@@ -1161,6 +1237,13 @@ class App(ctk.CTk):
         self._recent_toggle_btn.pack(side="right", padx=2)
         ctk.CTkButton(header, text="Clear", width=70,
                       command=self._clear_recent).pack(side="right", padx=2)
+        self._recent_retry_all_btn = ctk.CTkButton(
+            header, text="Retry all failed", width=120,
+            fg_color="#8b2e2e", hover_color="#a33",
+            command=self._retry_all_failed_recent,
+        )
+        self._recent_retry_all_btn.pack(side="right", padx=2)
+        self._recent_retry_all_btn.pack_forget()
 
         self.recent_frame = ctk.CTkScrollableFrame(outer)
         self.recent_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
@@ -1169,7 +1252,7 @@ class App(ctk.CTk):
             self._toggle_recent()
 
     def _build_log_pane(self) -> None:
-        outer = ctk.CTkFrame(self, height=self._LOG_EXPANDED_H)
+        outer = ctk.CTkFrame(self, height=self._log_expanded_height())
         outer.pack(side="bottom", fill="x", padx=10, pady=(0, 8))
         outer.pack_propagate(False)
         self._log_outer = outer
@@ -1180,6 +1263,23 @@ class App(ctk.CTk):
         ctk.CTkLabel(bar, textvariable=self.status_var, anchor="w").pack(
             side="left", fill="x", expand=True, padx=4,
         )
+        self._log_latest_btn = ctk.CTkButton(
+            bar, text="↓ Latest", width=80,
+            fg_color="transparent", border_width=1,
+            command=self._log_jump_to_latest,
+        )
+        self._log_size_btn = ctk.CTkButton(
+            bar, text=_LOG_HEIGHT_LABELS.get(self._log_height, "Size"),
+            width=110, fg_color="transparent", border_width=1,
+            command=self._cycle_log_height,
+        )
+        self._log_size_btn.pack(side="right", padx=2)
+        self._log_popout_btn = ctk.CTkButton(
+            bar, text="Pop out", width=80,
+            fg_color="transparent", border_width=1,
+            command=self._toggle_log_popout,
+        )
+        self._log_popout_btn.pack(side="right", padx=2)
         self._log_toggle_btn = ctk.CTkButton(
             bar, text="Hide log ▾", width=100,
             command=self._toggle_log,
@@ -1188,9 +1288,15 @@ class App(ctk.CTk):
         ctk.CTkButton(bar, text="Clear", width=70,
                       command=self._clear_log).pack(side="right", padx=2)
 
-        self.log_box = ctk.CTkTextbox(outer, height=80, wrap="none")
+        log_font = ctk.CTkFont(
+            size=13 if self._log_height != "normal" else 12,
+        )
+        self.log_box = ctk.CTkTextbox(
+            outer, height=80, wrap="none", font=log_font,
+        )
         self.log_box.pack(fill="both", expand=True, padx=6, pady=(2, 6))
         self.log_box.configure(state="disabled")
+        self._bind_log_scroll_tracking(self.log_box)
 
         self._log_collapsed = False
         if self.settings.get("panel_log_collapsed"):
@@ -1284,30 +1390,39 @@ class App(ctk.CTk):
             **params,
         )
 
+    def _music_skip_duplicates_checks_apple_music(self) -> bool:
+        return sys.platform == "darwin"
+
     def _music_duplicate_check(
         self,
         out_dir: str,
         *,
         result: SearchResult | None = None,
         track: MusicTrack | None = None,
-    ) -> tuple[bool, str]:
-        if track is not None:
-            basename = basename_for_track(track)
-            display = track.display_title()
-        elif result is not None:
-            basename = basename_for_result(result)
-            display = result.display_title()
-        else:
-            return False, ""
-        return music_exists_in_dir(out_dir, basename), display
+    ) -> tuple[bool, str, str]:
+        return check_music_duplicate(
+            out_dir,
+            result=result,
+            track=track,
+            check_apple_music=self._music_skip_duplicates_checks_apple_music(),
+        )
+
+    def _duplicate_exists_message(self, display: str, location: str, out_dir: str) -> str:
+        where = duplicate_location_label(location, out_dir)
+        if location == "library":
+            return f"{display} is already in {where}."
+        return f"{display} already exists in {where}."
 
     def _ask_batch_duplicate_action(self, names: list[str], out_dir: str) -> str:
-        folder = Path(out_dir).name or out_dir
+        if self._music_skip_duplicates_checks_apple_music():
+            where = "your Apple Music library or output folder"
+        else:
+            where = Path(out_dir).name or out_dir
         preview = names[:12]
         lines = "\n".join(f"  • {n}" for n in preview)
         extra = f"\n  … and {len(names) - 12} more" if len(names) > 12 else ""
         msg = (
-            f"{len(names)} track(s) already exist in {folder}:\n\n"
+            f"{len(names)} track(s) already exist in {where}:\n\n"
             f"{lines}{extra}\n\n"
             "Yes — download all (including duplicates)\n"
             "No — skip duplicates, download the rest\n"
@@ -1324,9 +1439,13 @@ class App(ctk.CTk):
         preview = "\n".join(f"  • {n}" for n in names[:15])
         extra = f"\n  … and {len(names) - 15} more" if len(names) > 15 else ""
         self._set_status(f"Skipped {len(names)} duplicate(s)")
+        if self._music_skip_duplicates_checks_apple_music():
+            where = "library or output folder"
+        else:
+            where = "folder"
         messagebox.showinfo(
             "Skipped duplicates",
-            f"Skipped {len(names)} track(s) already in folder:\n\n{preview}{extra}",
+            f"Skipped {len(names)} track(s) already in {where}:\n\n{preview}{extra}",
         )
 
     def _maybe_enqueue_music_download(
@@ -1341,14 +1460,13 @@ class App(ctk.CTk):
         force: bool = False,
     ) -> bool:
         if not force and self.music_skip_duplicates_var.get():
-            exists, display = self._music_duplicate_check(
+            exists, display, location = self._music_duplicate_check(
                 out_dir, result=result, track=track,
             )
             if exists:
-                folder = Path(out_dir).name or out_dir
                 if not messagebox.askyesno(
                     "Already downloaded",
-                    f"{display} already exists in {folder}.\n\nDownload anyway?",
+                    f"{self._duplicate_exists_message(display, location, out_dir)}\n\nDownload anyway?",
                 ):
                     self._set_status(f"Skipped duplicate: {display}")
                     return False
@@ -1358,7 +1476,58 @@ class App(ctk.CTk):
         )
         return True
 
+    def _maybe_cap_playlist_parallel(self, item_count: int) -> None:
+        if item_count < 5:
+            return
+        from .match_config import get_match_config
+
+        cfg = get_match_config(self._match_quality_key())
+        self._parallel_before_playlist = int(
+            self.settings.get("max_parallel_downloads") or 2,
+        )
+        self.jobs.set_max_parallel(
+            min(self._parallel_before_playlist, cfg.playlist_parallel),
+        )
+
+    def _maybe_restore_playlist_parallel(self) -> None:
+        saved = getattr(self, "_parallel_before_playlist", None)
+        if saved is None:
+            return
+        active_music = [j for j in self.jobs.active() if j.kind == "music"]
+        if not active_music:
+            self.jobs.set_max_parallel(saved)
+            self._parallel_before_playlist = None
+
     def _enqueue_music_downloads_batch(
+        self,
+        out_dir: str,
+        cookies: str | None,
+        items: list[tuple[str, str, SearchResult | None, MusicTrack | None]],
+    ) -> None:
+        if not items:
+            return
+
+        from . import apple_music as am
+
+        self._maybe_cap_playlist_parallel(len(items))
+        library_cache = (
+            self._music_skip_duplicates_checks_apple_music() and len(items) > 3
+        )
+        if library_cache:
+            try:
+                am.begin_library_cache(progress=self._set_status)
+            except Exception:  # noqa: BLE001
+                library_cache = False
+
+        try:
+            self._enqueue_music_downloads_batch_inner(
+                out_dir, cookies, items,
+            )
+        finally:
+            if library_cache:
+                am.end_library_cache()
+
+    def _enqueue_music_downloads_batch_inner(
         self,
         out_dir: str,
         cookies: str | None,
@@ -1377,7 +1546,7 @@ class App(ctk.CTk):
         to_enqueue: list[tuple[str, str, SearchResult | None, MusicTrack | None]] = []
         skipped: list[tuple[str, str, SearchResult | None, MusicTrack | None, str]] = []
         for url, label, result, track in items:
-            exists, display = self._music_duplicate_check(
+            exists, display, _location = self._music_duplicate_check(
                 out_dir, result=result, track=track,
             )
             if exists:
@@ -1755,6 +1924,45 @@ class App(ctk.CTk):
             **self._music_search_job_params(),
         )
 
+    def _music_retry_track(self, track_index: int) -> None:
+        if track_index < 0 or track_index >= len(self.music_tracks):
+            return
+        from dataclasses import replace
+
+        self.music_tracks[track_index] = replace(
+            self.music_tracks[track_index],
+            match_status=MATCH_PENDING,
+        )
+        self._music_render_results()
+        self._music_match_all()
+
+    def _music_retry_all_failed(self) -> None:
+        from dataclasses import replace
+
+        changed = False
+        for i, track in enumerate(self.music_tracks):
+            if track.match_status == MATCH_FAILED:
+                self.music_tracks[i] = replace(track, match_status=MATCH_PENDING)
+                changed = True
+        if not changed:
+            self._set_status("No failed tracks to retry.")
+            return
+        self._music_render_results()
+        self._music_match_all()
+
+    def _music_show_match(self, track: MusicTrack, track_index: int) -> None:
+        if not track.youtube_url:
+            self._set_status("No YouTube match for this track.")
+            return
+        _MatchDetailDialog(self, track, track_index)
+
+    def _music_review_matches(self) -> None:
+        matched = [t for t in self.music_tracks if t.youtube_url]
+        if not matched:
+            self._set_status("No matched tracks to review.")
+            return
+        _MatchReviewDialog(self, self.music_tracks)
+
     def _music_enqueue_matched_downloads(self, out_dir: str) -> None:
         cookies = self.settings.get("cookies_path") or None
         items: list[tuple[str, str, SearchResult | None, MusicTrack | None]] = []
@@ -1885,7 +2093,7 @@ class App(ctk.CTk):
                     ),
                 )
             matched = sum(1 for t in self.music_tracks if t.is_downloadable())
-            failed = sum(1 for t in self.music_tracks if t.match_status == "failed")
+            failed = sum(1 for t in self.music_tracks if t.match_status == MATCH_FAILED)
             pending = sum(1 for t in self.music_tracks if t.match_status == MATCH_PENDING)
             if self.music_tracks:
                 header = f"Tracks ({len(self.music_tracks)})"
@@ -1904,9 +2112,22 @@ class App(ctk.CTk):
                 self.music_match_btn.pack(side="right", padx=2)
             else:
                 self.music_match_btn.pack_forget()
+            if failed:
+                self.music_retry_failed_btn.configure(
+                    text=f"Retry {failed} failed",
+                )
+                self.music_retry_failed_btn.pack(side="right", padx=2)
+            else:
+                self.music_retry_failed_btn.pack_forget()
+            if matched:
+                self.music_review_matches_btn.pack(side="right", padx=2)
+            else:
+                self.music_review_matches_btn.pack_forget()
             return
 
         self.music_match_btn.pack_forget()
+        self.music_retry_failed_btn.pack_forget()
+        self.music_review_matches_btn.pack_forget()
         for i, r in enumerate(self.music_results):
             self._music_result_rows.append(
                 _ResultRow(
@@ -2214,6 +2435,8 @@ class App(ctk.CTk):
                     text=f"Results — {verb}: {_truncate(job.progress_msg or '...', 60)}"
                 )
         else:
+            if job.kind == "music":
+                self._maybe_restore_playlist_parallel()
             # Job is terminal — remove from active, add to recent (unless it was a search/resolve)
             row = self._active_rows.pop(job.id, None)
             if row is not None:
@@ -2396,6 +2619,7 @@ class App(ctk.CTk):
                     rr = self._recent_rows.pop(excess_id, None)
                     if rr is not None:
                         rr.frame.destroy()
+                self._reorder_recent_rows()
                 if job.state == FAILED:
                     self._set_status(f"[fail] {job.label}: {job.error}")
                 elif job.state == CANCELLED:
@@ -2407,11 +2631,9 @@ class App(ctk.CTk):
 
         # Update headers
         self.active_header.configure(text=f"Active downloads ({len(self._active_rows)})")
-        self.recent_header.configure(text=f"Recent ({len(self._recent_rows)})")
+        self._update_recent_header()
 
-        # Log line for any message change
-        if job.progress_msg:
-            self._log(f"[{job.state}] {job.label}: {job.progress_msg}")
+        self._maybe_log_job_progress(job)
 
     # ====================== Scroll-wheel forwarding =========================
     #
@@ -2631,22 +2853,202 @@ class App(ctk.CTk):
     def _set_status(self, text: str) -> None:
         self.status_var.set(text[:160])
 
+    def _log_widget_pinned(self, widget: ctk.CTkTextbox) -> bool:
+        try:
+            return float(widget.yview()[1]) >= 0.95
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _bind_log_scroll_tracking(self, widget: ctk.CTkTextbox) -> None:
+        def _on_scroll(_event=None) -> None:
+            self.after_idle(self._update_log_latest_btn)
+
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>",
+                    "<KeyPress>", "<Button-1>"):
+            widget.bind(seq, _on_scroll, add="+")
+
+    def _update_log_latest_btn(self) -> None:
+        embedded_pinned = self._log_widget_pinned(self.log_box)
+        popout_pinned = True
+        popout_btn = None
+        if self._log_popout is not None:
+            try:
+                if self._log_popout.winfo_exists():
+                    popout_pinned = self._log_widget_pinned(
+                        self._log_popout.textbox,
+                    )
+                    popout_btn = self._log_popout._latest_btn
+            except Exception:  # noqa: BLE001
+                self._log_popout = None
+
+        if embedded_pinned:
+            self._log_latest_btn.pack_forget()
+        else:
+            self._log_latest_btn.pack(
+                side="right", padx=2, before=self._log_size_btn,
+            )
+
+        if popout_btn is not None:
+            if popout_pinned:
+                popout_btn.pack_forget()
+            else:
+                popout_btn.pack(side="right", padx=2)
+
+    def _log_jump_to_latest(self) -> None:
+        for widget in (self.log_box,):
+            widget.configure(state="normal")
+            widget.see("end")
+            widget.configure(state="disabled")
+        if self._log_popout is not None:
+            try:
+                if self._log_popout.winfo_exists():
+                    self._log_popout.jump_to_latest()
+            except Exception:  # noqa: BLE001
+                pass
+        self._update_log_latest_btn()
+
+    def _append_log_line(self, text: str, widget: ctk.CTkTextbox) -> None:
+        pinned = self._log_widget_pinned(widget)
+        widget.configure(state="normal")
+        widget.insert("end", text + "\n")
+        if pinned:
+            widget.see("end")
+        widget.configure(state="disabled")
+
     def _log(self, text: str) -> None:
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", text + "\n")
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
+        self._append_log_line(text, self.log_box)
+        if self._log_popout is not None:
+            try:
+                if self._log_popout.winfo_exists():
+                    self._log_popout.append(text)
+            except Exception:  # noqa: BLE001
+                self._log_popout = None
+        self.after_idle(self._update_log_latest_btn)
 
     def _clear_log(self) -> None:
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
+        if self._log_popout is not None:
+            try:
+                if self._log_popout.winfo_exists():
+                    self._log_popout.clear()
+            except Exception:  # noqa: BLE001
+                pass
+        self._last_logged.clear()
+        self._last_log_time.clear()
+        self._update_log_latest_btn()
+
+    def _maybe_log_job_progress(self, job: Job) -> None:
+        if job.is_terminal:
+            if job.state == FAILED:
+                line = f"[failed] {job.label}: {job.error or job.progress_msg}"
+            elif job.state == CANCELLED:
+                line = f"[cancelled] {job.label}"
+            else:
+                line = f"[done] {job.label}"
+            self._log(line)
+            self._last_logged.pop(job.id, None)
+            self._last_log_time.pop(job.id, None)
+            return
+
+        if not job.progress_msg:
+            return
+
+        if job.progress_msg.startswith("[downloading]"):
+            now = time.monotonic()
+            last_t = self._last_log_time.get(job.id, 0.0)
+            if now - last_t < 1.0:
+                return
+            self._last_log_time[job.id] = now
+
+        if self._last_logged.get(job.id) == job.progress_msg:
+            return
+
+        self._last_logged[job.id] = job.progress_msg
+        self._log(f"[{job.state}] {job.label}: {job.progress_msg}")
+
+    def _cycle_log_height(self) -> None:
+        idx = _LOG_HEIGHT_CYCLE.index(self._log_height)
+        self._log_height = _LOG_HEIGHT_CYCLE[(idx + 1) % len(_LOG_HEIGHT_CYCLE)]
+        self.settings.set("panel_log_height", self._log_height)
+        self._log_size_btn.configure(
+            text=_LOG_HEIGHT_LABELS.get(self._log_height, "Size"),
+        )
+        if not self._log_collapsed:
+            self._log_outer.configure(height=self._log_expanded_height())
+        font = ctk.CTkFont(size=13 if self._log_height != "normal" else 12)
+        self.log_box.configure(font=font)
+
+    def _toggle_log_popout(self) -> None:
+        if self._log_popout is not None:
+            try:
+                if self._log_popout.winfo_exists():
+                    self._log_popout.focus()
+                    return
+            except Exception:  # noqa: BLE001
+                self._log_popout = None
+        content = self.log_box.get("1.0", "end").strip()
+        self._log_popout = _LogPopout(self, initial_text=content)
+
+    def _retry_job(self, job: Job) -> None:
+        params = copy.deepcopy(job.params)
+        self.jobs.enqueue(kind=job.kind, label=job.label, **params)
+
+    def _retry_all_failed_recent(self) -> None:
+        failed = [
+            row.job for row in self._recent_rows.values()
+            if row.job.state == FAILED
+        ]
+        if not failed:
+            return
+        for job in failed:
+            self._retry_job(job)
+        self._set_status(f"Retrying {len(failed)} failed job(s)…")
+
+    def _update_recent_header(self) -> None:
+        total = len(self._recent_rows)
+        failed = sum(
+            1 for r in self._recent_rows.values() if r.job.state == FAILED
+        )
+        cancelled = sum(
+            1 for r in self._recent_rows.values() if r.job.state == CANCELLED
+        )
+        ok = total - failed - cancelled
+        if total == 0:
+            text = "Recent (0)"
+        elif failed or cancelled:
+            bits = [f"Recent ({total})"]
+            if failed:
+                bits.append(f"{failed} failed")
+            if ok:
+                bits.append(f"{ok} ok")
+            if cancelled:
+                bits.append(f"{cancelled} cancelled")
+            text = " — ".join(bits)
+        else:
+            text = f"Recent ({total})"
+        self.recent_header.configure(text=text)
+        if failed:
+            self._recent_retry_all_btn.pack(side="right", padx=2,
+                                            before=self._recent_toggle_btn)
+        else:
+            self._recent_retry_all_btn.pack_forget()
+
+    def _reorder_recent_rows(self) -> None:
+        rows = list(self._recent_rows.values())
+        state_order = {FAILED: 0, CANCELLED: 1, DONE: 2}
+        rows.sort(key=lambda r: (state_order.get(r.job.state, 3), -r.job.id))
+        for row in rows:
+            row.frame.pack_forget()
+        for row in rows:
+            row.frame.pack(fill="x", padx=4, pady=2)
 
     def _clear_recent(self) -> None:
         for row in self._recent_rows.values():
             row.frame.destroy()
         self._recent_rows.clear()
-        self.recent_header.configure(text="Recent (0)")
+        self._update_recent_header()
 
     def _toggle_recent(self) -> None:
         self._recent_collapsed = not self._recent_collapsed
@@ -2679,7 +3081,7 @@ class App(ctk.CTk):
             self._log_outer.configure(height=self._COLLAPSED_H)
             self._log_toggle_btn.configure(text="Show log ▸")
         else:
-            self._log_outer.configure(height=self._LOG_EXPANDED_H)
+            self._log_outer.configure(height=self._log_expanded_height())
             self.log_box.pack(fill="both", expand=True, padx=6, pady=(2, 6))
             self._log_toggle_btn.configure(text="Hide log ▾")
         self.settings.set("panel_log_collapsed", self._log_collapsed)
@@ -2966,7 +3368,11 @@ class _MusicTrackRow:
         self.outer = ctk.CTkFrame(parent, fg_color="transparent")
         self.outer.pack(fill="x", padx=4, pady=3)
 
-        self.frame = ctk.CTkFrame(self.outer)
+        border_kw: dict[str, Any] = {}
+        if track.match_status == MATCH_FAILED:
+            border_kw = {"border_width": 2, "border_color": ("#c44", "#f55")}
+
+        self.frame = ctk.CTkFrame(self.outer, **border_kw)
         self.frame.pack(fill="x")
 
         thumb_url = track.cover_url or track.thumbnail_url
@@ -2991,7 +3397,7 @@ class _MusicTrackRow:
         meta = track.metadata_line()
         if meta:
             color = ("gray40", "gray70")
-            if track.match_status == "failed":
+            if track.match_status == MATCH_FAILED:
                 color = ("#a33", "#f66")
             ctk.CTkLabel(
                 text_col, text=meta, anchor="w", text_color=color,
@@ -3001,6 +3407,11 @@ class _MusicTrackRow:
         btn_col.pack(side="right", padx=6, pady=4)
 
         if track.is_downloadable():
+            ctk.CTkButton(
+                btn_col, text="View match", width=100,
+                fg_color="transparent", border_width=1,
+                command=lambda: app._music_show_match(track, track_index),
+            ).pack(side="right", padx=2)
             ctk.CTkButton(
                 btn_col, text="Change", width=80,
                 fg_color="transparent", border_width=1,
@@ -3026,7 +3437,7 @@ class _MusicTrackRow:
             ).pack(side="right", padx=2)
             ctk.CTkButton(
                 btn_col, text="Retry", width=80,
-                command=app._music_match_all,
+                command=lambda: app._music_retry_track(track_index),
             ).pack(side="right", padx=2)
 
         app._bind_results_mousewheel(self.frame)
@@ -3198,6 +3609,205 @@ class _ResultRow:
             pass
 
 
+class _LogPopout(ctk.CTkToplevel):
+    """Detached log window sharing the main app's log stream."""
+
+    def __init__(self, app: "App", *, initial_text: str = "") -> None:
+        super().__init__(app)
+        self.app = app
+        self.title("easy-dlp — Log")
+        self.geometry("900x500")
+        self.minsize(500, 300)
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=8, pady=(6, 2))
+        self._latest_btn = ctk.CTkButton(
+            bar, text="↓ Latest", width=80,
+            fg_color="transparent", border_width=1,
+            command=self.jump_to_latest,
+        )
+        ctk.CTkButton(
+            bar, text="Clear", width=70,
+            command=self._clear,
+        ).pack(side="right", padx=2)
+        ctk.CTkButton(
+            bar, text="Close", width=70,
+            command=self._close,
+        ).pack(side="right", padx=2)
+
+        font = ctk.CTkFont(size=13)
+        self.textbox = ctk.CTkTextbox(self, wrap="none", font=font)
+        self.textbox.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.textbox.configure(state="disabled")
+        self.app._bind_log_scroll_tracking(self.textbox)
+
+        if initial_text:
+            self.textbox.configure(state="normal")
+            self.textbox.insert("1.0", initial_text + "\n")
+            self.textbox.see("end")
+            self.textbox.configure(state="disabled")
+
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.after(100, self.lift)
+
+    def append(self, text: str) -> None:
+        self.app._append_log_line(text, self.textbox)
+        self.app.after_idle(self.app._update_log_latest_btn)
+
+    def jump_to_latest(self) -> None:
+        self.textbox.configure(state="normal")
+        self.textbox.see("end")
+        self.textbox.configure(state="disabled")
+        self._latest_btn.pack_forget()
+        self.app.after_idle(self.app._update_log_latest_btn)
+
+    def clear(self) -> None:
+        self.textbox.configure(state="normal")
+        self.textbox.delete("1.0", "end")
+        self.textbox.configure(state="disabled")
+
+    def _clear(self) -> None:
+        self.app._clear_log()
+
+    def _close(self) -> None:
+        self.app._log_popout = None
+        self.destroy()
+
+
+class _MatchDetailDialog(ctk.CTkToplevel):
+    """Show source track vs YouTube match for one playlist track."""
+
+    def __init__(self, app: "App", track: MusicTrack, track_index: int) -> None:
+        super().__init__(app)
+        self.app = app
+        self.track_index = track_index
+        self.title("YouTube match")
+        self.geometry("560x320")
+        self.resizable(True, True)
+
+        body = ctk.CTkFrame(self)
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+
+        ctk.CTkLabel(
+            body, text="Source track", anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            body, text=track.display_title(), anchor="w", justify="left",
+            wraplength=520,
+        ).pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(
+            body, text="YouTube match", anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(fill="x")
+        yt_title = track.youtube_title or track.title
+        yt_artist = track.youtube_uploader or track.artist
+        ctk.CTkLabel(
+            body, text=f"{yt_artist} — {yt_title}", anchor="w",
+            justify="left", wraplength=520,
+        ).pack(fill="x", pady=(0, 4))
+
+        url_box = ctk.CTkTextbox(body, height=48, wrap="word")
+        url_box.pack(fill="x", pady=(0, 8))
+        url_box.insert("1.0", track.youtube_url or "")
+        url_box.configure(state="disabled")
+
+        btn_row = ctk.CTkFrame(body, fg_color="transparent")
+        btn_row.pack(fill="x")
+        ctk.CTkButton(
+            btn_row, text="Open in browser", width=130,
+            command=lambda: webbrowser.open(track.youtube_url or ""),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            btn_row, text="Copy link", width=100,
+            command=lambda: app.clipboard_clear()
+            or app.clipboard_append(track.youtube_url or "")
+            or app._set_status("Link copied"),
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            btn_row, text="Change match", width=110,
+            fg_color="transparent", border_width=1,
+            command=self._change_match,
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            btn_row, text="Close", width=80,
+            command=self.destroy,
+        ).pack(side="right")
+
+        self.after(100, self.lift)
+
+    def _change_match(self) -> None:
+        self.destroy()
+        self.app._music_toggle_alternate(self.track_index)
+
+
+class _MatchReviewDialog(ctk.CTkToplevel):
+    """Scrollable table of all matched tracks for quick manual review."""
+
+    def __init__(self, app: "App", tracks: list[MusicTrack]) -> None:
+        super().__init__(app)
+        self.app = app
+        self.title("Review matches")
+        self.geometry("980x600")
+        self.minsize(700, 400)
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=12, pady=(10, 4))
+        matched = sum(1 for t in tracks if t.youtube_url)
+        ctk.CTkLabel(
+            header,
+            text=f"{matched} matched track(s) — open links to verify",
+            anchor="w", font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left")
+
+        scroll = ctk.CTkScrollableFrame(self)
+        scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        for i, track in enumerate(tracks):
+            if not track.youtube_url:
+                continue
+            row = ctk.CTkFrame(scroll, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+
+            ctk.CTkLabel(
+                row, text=track.display_title(70), anchor="w",
+                width=280, justify="left",
+            ).pack(side="left", padx=(4, 8))
+
+            yt_label = (
+                f"{track.youtube_uploader or '?'} — "
+                f"{_truncate(track.youtube_title or track.title, 45)}"
+            )
+            ctk.CTkLabel(
+                row, text=yt_label, anchor="w",
+                text_color=("gray30", "gray75"), width=380, justify="left",
+            ).pack(side="left", fill="x", expand=True, padx=4)
+
+            ctk.CTkButton(
+                row, text="Open", width=60,
+                command=lambda u=track.youtube_url: webbrowser.open(u or ""),
+            ).pack(side="right", padx=2)
+            ctk.CTkButton(
+                row, text="Copy", width=60,
+                command=lambda u=track.youtube_url: app.clipboard_clear()
+                or app.clipboard_append(u or "")
+                or app._set_status("Link copied"),
+            ).pack(side="right", padx=2)
+            ctk.CTkButton(
+                row, text="View", width=60,
+                fg_color="transparent", border_width=1,
+                command=lambda idx=i, t=track: _MatchDetailDialog(app, t, idx),
+            ).pack(side="right", padx=2)
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkButton(footer, text="Close", width=80,
+                      command=self.destroy).pack(side="right")
+
+        self.after(100, self.lift)
+
+
 class _ActiveRow:
     def __init__(self, parent, job: Job, app: "App") -> None:
         self.frame = ctk.CTkFrame(parent)
@@ -3231,20 +3841,66 @@ class _ActiveRow:
 
 class _RecentRow:
     _GLYPH = {DONE: "✓", FAILED: "✗", CANCELLED: "—"}
+    _GLYPH_COLOR = {
+        DONE: ("#1a7a1a", "#4ade4a"),
+        FAILED: ("#a33", "#f66"),
+        CANCELLED: ("gray40", "gray60"),
+    }
 
     def __init__(self, parent, job: Job, app: "App") -> None:
-        self.frame = ctk.CTkFrame(parent)
+        self.job = job
+        self.app = app
+        border_kw: dict[str, Any] = {}
+        if job.state == FAILED:
+            border_kw = {"border_width": 2, "border_color": ("#c44", "#f55")}
+        self.frame = ctk.CTkFrame(parent, **border_kw)
         self.frame.pack(fill="x", padx=4, pady=2)
+
+        inner = ctk.CTkFrame(self.frame, fg_color="transparent")
+        inner.pack(fill="x", padx=8, pady=4)
+
         glyph = self._GLYPH.get(job.state, "·")
-        text = f"{glyph}  {job.label}"
+        glyph_color = self._GLYPH_COLOR.get(job.state, ("gray40", "gray70"))
+        ctk.CTkLabel(
+            inner, text=glyph, width=20,
+            text_color=glyph_color, font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(side="left", padx=(0, 6))
+
+        text_col = ctk.CTkFrame(inner, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+        label_font = ctk.CTkFont(weight="bold")
+        if job.state == FAILED:
+            label_font = ctk.CTkFont(weight="bold")
+        ctk.CTkLabel(
+            text_col, text=job.label, anchor="w", justify="left",
+            font=label_font, wraplength=700,
+        ).pack(fill="x")
         if job.state == FAILED and job.error:
-            text += f"  —  {job.error}"
+            ctk.CTkLabel(
+                text_col, text=job.error, anchor="w", justify="left",
+                text_color=("#a33", "#f66"), wraplength=700,
+            ).pack(fill="x")
         elif job.state == CANCELLED:
-            text += "  —  cancelled"
-        ctk.CTkLabel(self.frame, text=text, anchor="w",
-                     justify="left", wraplength=900).pack(
-            fill="x", padx=8, pady=4,
-        )
+            ctk.CTkLabel(
+                text_col, text="cancelled", anchor="w",
+                text_color=("gray40", "gray70"),
+            ).pack(fill="x")
+
+        btn_col = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_col.pack(side="right", padx=(4, 0))
+
+        out_dir = job.params.get("output_dir")
+        if job.state == DONE and out_dir:
+            ctk.CTkButton(
+                btn_col, text="📁", width=40,
+                command=lambda: _reveal_in_file_manager(out_dir),
+            ).pack(side="right", padx=2)
+
+        if job.state in (FAILED, CANCELLED):
+            ctk.CTkButton(
+                btn_col, text="Retry", width=70,
+                command=lambda: app._retry_job(job),
+            ).pack(side="right", padx=2)
 
 
 # ============================================================================

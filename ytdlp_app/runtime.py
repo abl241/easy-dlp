@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 
 _COMMON_FFMPEG_PATHS = (
@@ -83,3 +84,84 @@ def ffmpeg_dir() -> str | None:
     """
     binary = find_ffmpeg()
     return str(binary.parent) if binary else None
+
+
+_COMMON_NODE_PATHS = (
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/usr/bin/node",
+)
+
+
+@functools.lru_cache(maxsize=1)
+def find_deno() -> Path | None:
+    """Return a Deno binary for yt-dlp's YouTube JS challenge solver."""
+    try:
+        from deno import find_deno_bin
+
+        candidate = Path(find_deno_bin())
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    except (ImportError, FileNotFoundError, OSError):
+        pass
+
+    on_path = shutil.which("deno")
+    if on_path:
+        return Path(on_path)
+
+    for candidate in _COMMON_NODE_PATHS:
+        deno = candidate.replace("/node", "/deno")
+        p = Path(deno)
+        if p.is_file() and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def find_node() -> Path | None:
+    """Return a Node.js binary as a fallback JS runtime for yt-dlp."""
+    on_path = shutil.which("node")
+    if on_path:
+        return Path(on_path)
+
+    nvm_root = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_root.is_dir():
+        versions = sorted(
+            (p / "bin" / "node" for p in nvm_root.iterdir() if p.is_dir()),
+            reverse=True,
+        )
+        for candidate in versions:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+
+    for candidate in _COMMON_NODE_PATHS:
+        p = Path(candidate)
+        if p.is_file() and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def ytdlp_js_runtimes() -> dict[str, dict[str, str | None]]:
+    """JS runtime config for yt-dlp (Deno preferred; Node as fallback)."""
+    runtimes: dict[str, dict[str, str | None]] = {}
+    deno = find_deno()
+    if deno:
+        runtimes["deno"] = {"path": str(deno)}
+    node = find_node()
+    if node:
+        runtimes["node"] = {"path": str(node)}
+    return runtimes
+
+
+def apply_ytdlp_runtime_opts(opts: dict[str, Any]) -> None:
+    """Attach ffmpeg and JS runtime settings needed for YouTube downloads."""
+    from .rate_limit import apply_rate_limit_opts
+
+    fd = ffmpeg_dir()
+    if fd:
+        opts["ffmpeg_location"] = fd
+    runtimes = ytdlp_js_runtimes()
+    if runtimes:
+        opts["js_runtimes"] = runtimes
+    apply_rate_limit_opts(opts)

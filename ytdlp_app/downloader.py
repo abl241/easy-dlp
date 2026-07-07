@@ -19,7 +19,8 @@ import yt_dlp
 
 from .metadata.itunes import ITunesTrack, search_track
 from .metadata.parse import parse_youtube_track, sanitize_filename
-from .runtime import ffmpeg_dir
+from .rate_limit import guard_ytdlp_call
+from .runtime import apply_ytdlp_runtime_opts, ffmpeg_dir
 from .search import _ytdlp_opts_base
 
 
@@ -80,9 +81,7 @@ def _shared_opts(out_dir: str, cookies_path: str | None) -> dict[str, Any]:
         "quiet": True,
         "no_warnings": False,
     }
-    fd = ffmpeg_dir()
-    if fd:
-        opts["ffmpeg_location"] = fd
+    apply_ytdlp_runtime_opts(opts)
     if cookies_path and Path(cookies_path).is_file():
         opts["cookiefile"] = cookies_path
     return opts
@@ -251,8 +250,13 @@ def _run(
         collect_infos=collect_infos,
     )
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            code = ydl.download(list(urls))
+        url_list = list(urls)
+
+        def _do_download() -> int:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.download(url_list)
+
+        code = guard_ytdlp_call(_do_download, progress=progress)
     except _Cancelled:
         return DownloadResult(success=False, message="cancelled")
     except yt_dlp.utils.DownloadError as e:
@@ -347,13 +351,17 @@ def _peek_video_info(
     if fd:
         opts["ffmpeg_location"] = fd
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False) or {}
+
+        def _do_extract() -> dict[str, Any]:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False) or {}
+            return info if isinstance(info, dict) else {}
+
+        return guard_ytdlp_call(_do_extract, progress=lambda msg: None)
     except yt_dlp.utils.DownloadError:
         return {}
     except Exception:  # noqa: BLE001
         return {}
-    return info if isinstance(info, dict) else {}
 
 
 def download_music(

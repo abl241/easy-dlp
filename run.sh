@@ -100,6 +100,8 @@ doctor() {
   if [[ -x "$PY_BIN" ]]; then
     echo "  python:  $("$PY_BIN" --version)"
     echo "  yt-dlp:  $("$PY_BIN" -c 'import yt_dlp; print(yt_dlp.version.__version__)' 2>&1 || echo 'not installed')"
+    echo "  yt-dlp-ejs: $("$PY_BIN" -c 'import yt_dlp_ejs; print("ok")' 2>&1 || echo 'not installed')"
+    echo "  deno:      $("$PY_BIN" -c 'from deno import find_deno_bin; print(find_deno_bin())' 2>&1 || echo 'not installed')"
     echo "  customtkinter: $("$PY_BIN" -c 'import customtkinter; print(customtkinter.__version__)' 2>&1 || echo 'not installed')"
   else
     echo "  not built yet (run ./run.sh)"

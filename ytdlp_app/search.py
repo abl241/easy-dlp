@@ -16,6 +16,10 @@ from urllib.parse import quote_plus
 
 import yt_dlp
 
+from .match_config import get_match_config
+from .rate_limit import guard_ytdlp_call
+from .runtime import apply_ytdlp_runtime_opts
+
 
 ProgressFn = Callable[[str], None]
 
@@ -48,6 +52,7 @@ def _ytdlp_opts_base(*, cookies_path: str | None = None) -> dict[str, Any]:
     }
     if cookies_path:
         opts["cookiefile"] = cookies_path
+    apply_ytdlp_runtime_opts(opts)
     return opts
 
 
@@ -97,6 +102,7 @@ def search_youtube(
     audio_only: bool = False,
     use_youtube_music: bool = False,
     enrich_from: int = 0,
+    enrich: bool = True,
 ) -> list[SearchResult]:
     """Run a YouTube search OR resolve a single URL if `query` looks like one.
 
@@ -128,6 +134,8 @@ def search_youtube(
             allow_missing_duration=True,
         )
         results = results[:raw_limit]
+        if not enrich:
+            return results
         enrich_from = max(0, min(int(enrich_from), len(results)))
         if enrich_from > 0:
             head = results[:enrich_from]
@@ -241,6 +249,7 @@ def find_youtube_match_for_track(
     progress: ProgressFn = lambda msg: None,
     use_youtube_music: bool = False,
     audio_only: bool = True,
+    match_quality: str = "balanced",
 ) -> SearchResult | None:
     """Search YouTube for the best match for a known track.
 
@@ -248,6 +257,10 @@ def find_youtube_match_for_track(
     back to music videos / any matching upload if nothing passes scoring.
     """
     from .metadata.parse import ParsedTrack
+    from .rate_limit import set_sleep_interval_requests
+
+    cfg = get_match_config(match_quality)
+    set_sleep_interval_requests(cfg.sleep_interval_requests)
 
     query = " ".join(x for x in (artist, title) if x).strip()
     if not query:
@@ -264,61 +277,105 @@ def find_youtube_match_for_track(
     )
     parsed = ParsedTrack(artist=artist, title=title)
 
-    if use_youtube_music:
-        progress(f"Searching YouTube Music for {query!r}...")
-        candidates = search_youtube(
-            query,
-            limit=10,
+    def _flat_search(
+        q: str,
+        *,
+        ytm: bool = False,
+        audio: bool = False,
+    ) -> list[SearchResult]:
+        return search_youtube(
+            q,
+            limit=cfg.search_limit,
             cookies_path=cookies_path,
             cancel_event=cancel_event,
             progress=progress,
-            use_youtube_music=True,
+            videos_only=True,
+            audio_only=audio and audio_only,
+            use_youtube_music=ytm,
+            enrich=False,
         )
-        if candidates:
-            best = _pick_best_audio_candidate(
-                candidates, stub, parsed,
-                expected_duration_s=duration_s,
-                min_score=0.45,
+
+    def _pick_with_lazy_enrich(candidates: list[SearchResult], min_score: float) -> SearchResult | None:
+        if not candidates:
+            return None
+        scored = [
+            (c, _score_audio_candidate(c, parsed, stub, expected_duration_s=duration_s))
+            for c in candidates
+        ]
+        scored.sort(key=lambda item: item[1], reverse=True)
+        best_flat, best_score = scored[0]
+
+        if cfg.enrich_top_n <= 0:
+            if best_score >= min_score:
+                return best_flat
+            return None
+
+        if best_score >= cfg.fallback_min_score and cfg.fallback_min_score > 0:
+            top = [c for c, s in scored[: cfg.enrich_top_n] if s >= min_score * 0.85]
+            if not top:
+                top = [best_flat]
+            enriched = _enrich_flat_results(
+                top,
+                cookies_path=cookies_path,
+                cancel_event=cancel_event,
+                progress=progress,
+                max_workers=1,
             )
-            if best is not None:
-                return _enrich_flat_results(
-                    [best],
-                    cookies_path=cookies_path,
-                    cancel_event=cancel_event,
-                    progress=progress,
-                )[0]
+            return _pick_best_audio_candidate(
+                enriched, stub, parsed,
+                expected_duration_s=duration_s,
+                min_score=min_score,
+            )
+
+        top = [c for c, s in scored[: cfg.enrich_top_n] if s > 0]
+        if not top:
+            return None
+        enriched = _enrich_flat_results(
+            top,
+            cookies_path=cookies_path,
+            cancel_event=cancel_event,
+            progress=progress,
+            max_workers=1,
+        )
+        return _pick_best_audio_candidate(
+            enriched, stub, parsed,
+            expected_duration_s=duration_s,
+            min_score=min_score,
+        )
+
+    if use_youtube_music:
+        progress(f"Searching YouTube Music for {query!r} ({cfg.name})…")
+        candidates = _flat_search(query, ytm=True)
+        best = _pick_with_lazy_enrich(candidates, cfg.min_match_score)
+        if best is not None:
+            return best
         progress("No confident YouTube Music match — trying regular YouTube…")
 
     for try_audio in (True, False):
         if not try_audio and use_youtube_music:
             break
         label = "audio" if try_audio else "any upload"
-        progress(f"Searching YouTube ({label}) for {query!r}...")
-        candidates = search_youtube(
-            query,
-            limit=10,
-            cookies_path=cookies_path,
-            cancel_event=cancel_event,
-            progress=progress,
-            videos_only=True,
-            audio_only=try_audio and audio_only,
-        )
+        progress(f"Searching YouTube ({label}) for {query!r}…")
+        candidates = _flat_search(query, audio=try_audio)
         if not candidates:
             if try_audio:
                 progress("No audio uploads found — trying music videos…")
             continue
-        min_score = 0.55 if try_audio else 0.45
-        best = _pick_best_audio_candidate(
-            candidates, stub, parsed,
-            expected_duration_s=duration_s,
-            min_score=min_score,
-        )
-        if best is not None:
+        min_score = cfg.min_match_score if try_audio else cfg.min_match_score - 0.05
+        pick = _pick_with_lazy_enrich(candidates, min_score)
+        if pick is not None:
             if not try_audio:
-                progress(f"Using music video: {best.display_title(70)}")
-            return best
+                progress(f"Using music video: {pick.display_title(70)}")
+            return pick
         if try_audio:
             progress("No confident audio match — trying music videos…")
+
+    if artist and title and cfg.name != "fast":
+        progress(f"Trying official-audio search for {artist!r} — {title!r}…")
+        candidates = _flat_search(f"{artist} {title} official audio", audio=True)
+        pick = _pick_with_lazy_enrich(candidates, cfg.min_match_score - 0.05)
+        if pick is not None:
+            return pick
     return None
 
 
@@ -383,9 +440,12 @@ def _extract_info(
     if cancel_event is not None and cancel_event.is_set():
         return {}
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(target, download=False) or {}
-    return info if isinstance(info, dict) else {}
+    def _do_extract() -> dict[str, Any]:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(target, download=False) or {}
+        return info if isinstance(info, dict) else {}
+
+    return guard_ytdlp_call(_do_extract, progress=lambda msg: None)
 
 
 def _entries_to_results(
@@ -435,6 +495,14 @@ _VIDEO_HINT_RE = re.compile(
     r"|\bbehind\s+the\s+scenes\b|\bmaking\s+of\b)",
     re.IGNORECASE,
 )
+_COVER_HINT_RE = re.compile(
+    r"\b(lullaby|rockabye|cover|tribute|karaoke|instrumental|rendition|"
+    r"reimagined|8[\s-]?bit|chiptune|nightcore|ukulele|saxophone|violin|"
+    r"piano\s+cover|acoustic\s+cover|kids?\s+version|baby'?s?|"
+    r"string\s+quartet|orchestral\s+cover|metal\s+cover|"
+    r"in\s+the\s+style\s+of|made\s+popular\s+by)\b",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_video(entry: dict[str, Any], *, allow_missing_duration: bool = False) -> bool:
@@ -466,10 +534,12 @@ def _filter_audio_only(results: list[SearchResult]) -> list[SearchResult]:
     """Drop entries whose titles look like music videos / live performances.
 
     "* - Topic" uploaders are YouTube's auto-generated channels for record
-    labels and are kept regardless of title (they're audio-only by design).
+    labels and are kept when the artist looks legitimate (not a cover act).
     """
     out: list[SearchResult] = []
     for r in results:
+        if _looks_like_cover_upload(r.title, r.uploader):
+            continue
         is_topic = r.uploader.endswith(" - Topic")
         if is_topic:
             out.append(r)
@@ -524,23 +594,50 @@ def _score_audio_candidate(
     *,
     expected_duration_s: int | None = None,
 ) -> float:
+    if _looks_like_cover_upload(candidate.title, candidate.uploader):
+        return 0.0
+
     compare_title = candidate.title
     if parsed.artist:
         compare_title = _strip_leading_artist(compare_title, parsed.artist)
     title_score = _token_overlap(compare_title, parsed.title or original.title)
-    artist_score = (
-        _artist_overlap(candidate.uploader, parsed.artist)
-        if parsed.artist
-        else 0.4
-    )
+
+    uploader = (candidate.uploader or "").strip()
+    if not uploader and parsed.artist:
+        from .metadata.parse import parse_youtube_track
+
+        guessed = parse_youtube_track(candidate.title, "")
+        if guessed.artist:
+            uploader = guessed.artist
+        artist_score = max(
+            _artist_overlap(uploader, parsed.artist),
+            0.45 if title_score >= 0.6 else 0.0,
+        )
+    elif parsed.artist:
+        artist_score = _artist_overlap(uploader, parsed.artist)
+    else:
+        artist_score = 0.4
     if title_score < 0.45:
         return 0.0
-    if parsed.artist and artist_score < 0.25:
+    if parsed.artist and artist_score < 0.35:
         return 0.0
 
     score = title_score * 0.45 + artist_score * 0.35
+    if parsed.artist:
+        if artist_score >= 0.85:
+            score += 0.2
+        elif artist_score >= 0.7:
+            score += 0.1
     if candidate.uploader.endswith(" - Topic"):
-        score += 0.15
+        topic_artist = _topic_channel_artist(candidate.uploader)
+        if parsed.artist:
+            topic_overlap = _artist_overlap(topic_artist, parsed.artist)
+            if topic_overlap >= 0.7:
+                score += 0.15
+            elif topic_overlap < 0.35:
+                return 0.0
+        else:
+            score += 0.05
     if _AUDIO_HINT_RE.search(candidate.title):
         score += 0.05
     ref_duration = expected_duration_s or original.duration_s
@@ -551,8 +648,24 @@ def _score_audio_candidate(
         elif delta <= 8:
             score += 0.05
         elif delta > 25:
-            score -= 0.25
+            score -= 0.35
+        elif delta > 15:
+            score -= 0.2
+    if candidate.view_count and candidate.view_count >= 100_000:
+        score += min(0.05, 0.01 * (len(str(candidate.view_count)) - 5))
     return max(0.0, min(1.0, score))
+
+
+def _topic_channel_artist(uploader: str) -> str:
+    suffix = " - Topic"
+    if uploader.endswith(suffix):
+        return uploader[: -len(suffix)].strip()
+    return uploader
+
+
+def _looks_like_cover_upload(title: str, uploader: str) -> bool:
+    blob = f"{title} {uploader}"
+    return bool(_COVER_HINT_RE.search(blob))
 
 
 def _strip_leading_artist(title: str, artist: str) -> str:
@@ -675,10 +788,14 @@ def _extract_flat_video_info(
         "socket_timeout": 15,
     })
     url = f"https://www.youtube.com/watch?v={video_id}"
-    try:
+
+    def _do_extract() -> dict[str, Any]:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False) or {}
         return info if isinstance(info, dict) else {}
+
+    try:
+        return guard_ytdlp_call(_do_extract, progress=lambda msg: None)
     except yt_dlp.utils.DownloadError:
         return {}
     except Exception:  # noqa: BLE001
@@ -731,6 +848,7 @@ def _enrich_flat_results(
     cookies_path: str | None,
     cancel_event: threading.Event | None,
     progress: ProgressFn,
+    max_workers: int = 4,
 ) -> list[SearchResult]:
     """Fill missing artist/thumbnail fields from per-video yt-dlp lookups."""
     pending: list[tuple[int, SearchResult]] = [
@@ -751,7 +869,7 @@ def _enrich_flat_results(
         info = _extract_flat_video_info(video_id, cookies_path=cookies_path)
         return index, _merge_enriched_result(result, info)
 
-    workers = min(4, total)
+    workers = min(max(1, max_workers), total)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_enrich_one, item) for item in pending]
         for fut in as_completed(futures):

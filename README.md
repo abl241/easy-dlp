@@ -335,7 +335,27 @@ On first use, macOS may ask for permission to let easy-dlp control the Music app
 
 ### Skip duplicates
 
-When enabled, easy-dlp checks your music output folder before downloading and offers to skip tracks that already exist there (by predicted filename).
+When enabled, easy-dlp checks your music output folder and (on macOS) your Apple Music library before downloading, and offers to skip tracks that already exist (by predicted filename or library metadata match).
+
+### Match quality (playlists)
+
+When matching a Spotify playlist (or any multi-track import), **Settings → Match quality** controls the speed vs. accuracy tradeoff:
+
+| Mode | Best for |
+|:---|:---|
+| **Fast (playlists)** | Large playlists — fewer YouTube lookups, lower rate-limit risk |
+| **Balanced** | Default — enriches top candidates and runs official-audio fallback |
+| **Accurate** | Obscure or ambiguous titles — more search results and verification |
+
+easy-dlp also backs off automatically when YouTube returns rate-limit errors during matching or download.
+
+### Review & verify matches
+
+After **Match on YouTube**, use **Review matches** in the results header to open a scrollable table of every source track and its YouTube pick — with **Open**, **Copy**, and **View** per row for quick manual spot-checking.
+
+Each matched track row also has **View match** (source vs. YouTube upload, link, Open/Copy/Change) and **Change** to pick a different upload.
+
+Failed matches show a red border; **Retry** on a row re-matches only that track. **Retry N failed** in the header retries all failed rows at once.
 
 ### Search or paste
 
@@ -420,7 +440,7 @@ Always visible at the bottom of the window. Shows every in-flight job with a **p
 
 ### Recent jobs panel
 
-Completed, failed, and cancelled jobs move here automatically. Each row has **Open output folder** to jump straight to the finished file in Finder/Explorer.
+Completed, failed, and cancelled jobs move here automatically. Failed rows are highlighted in red with the error on a separate line. Each failed or cancelled row has **Retry**; the header shows counts (e.g. `Recent (10) — 2 failed — 8 ok`) and **Retry all failed** when needed. Failed jobs sort to the top. Successful rows can open the output folder with **📁**.
 
 ### Collapsible panels
 
@@ -429,6 +449,11 @@ Collapse the Active, Recent, or Log panels independently to reclaim screen space
 ### Live log
 
 A scrollable log pane captures per-job output from yt-dlp and ffmpeg — useful for diagnosing failures without opening a terminal.
+
+- **Smart scroll** — scrolling up to read older lines no longer jumps you back to the bottom when new lines arrive; click **↓ Latest** to re-pin.
+- **Size** — cycle Normal / Large / X-Large for the embedded log (saved in settings).
+- **Pop out** — open the log in a separate, resizable window that shares the same stream.
+- Duplicate progress spam is suppressed — download status lives in the Active panel progress bar; the log focuses on milestones and errors.
 
 <br>
 
@@ -460,6 +485,10 @@ Choose **System**, **Light**, or **Dark**. System follows your OS appearance aut
 ### Scroll direction
 
 On macOS, easy-dlp reads your system's Natural Scrolling preference. You can also force **Natural** or **Inverted** scroll behavior for the results panels.
+
+### Match quality
+
+Choose **Fast (playlists)**, **Balanced**, or **Accurate** for YouTube matching when importing multi-track sources (see [Match quality](#match-quality-playlists) under Music tab).
 
 ### Settings location
 
@@ -511,7 +540,7 @@ On macOS, easy-dlp reads your system's Natural Scrolling preference. You can als
 
 1. Open **Paste Link** and set **Source** to **Spotify**
 2. Paste the Spotify URL → **Resolve & Pick**
-3. **Match on YouTube** → review results (failed rows can be retried)
+3. **Match on YouTube** → review results (**Review matches** for the full list; **View match** per row)
 4. **Download all** — files land in your music output folder with correct track numbers and album art
 
 ## Cookies (optional)
@@ -553,7 +582,10 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 | Age-restricted video fails | Add a cookies file in Settings |
 | Stale yt-dlp / broken downloads | Run `./run.sh --update` or `./run.sh --reset` |
 | Spotify playlist won't resolve | Playlist may be private; use the `Artist - Title` text fallback instead |
-| Song shows "no YouTube match" | Click **Retry** on the row, or re-run **Match on YouTube**; obscure tracks may only exist as music videos |
+| Song shows "no YouTube match" | Click **Retry** on the row or **Retry N failed** in the header; try **Match quality → Accurate** in Settings for obscure tracks |
+| Wrong track matched | **View match** to inspect the pick, then **Change** to search alternates |
+| Log scrolls away while reading | Scroll up freely; click **↓ Latest** in the log bar to jump back |
+| YouTube rate limiting during playlists | Use **Match quality → Fast**; wait a few minutes and retry failed rows |
 | Wrong track numbers on album | Re-download after updating — older builds wrote disc number into the wrong ID3 field |
 
 <br>
@@ -576,6 +608,7 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 | Playlist import | spotifyscraper | Public Spotify playlist/album metadata (no API key) |
 | Lyrics | LRCLIB | Synced lyric fetch |
 | Concurrency | `threading` + `queue` | Non-blocking UI with a worker job queue |
+| Rate limiting | Exponential backoff | Automatic wait/retry when YouTube throttles requests |
 | Settings | JSON on disk | Persistent, OS-appropriate config directory |
 | Packaging | `run.sh` + venv | One-command setup for non-developers |
 
@@ -590,6 +623,8 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 | Fuzzy audio matching | Music mode scores YouTube candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics — with music-video fallback |
 | Platform registry | `sources/` module resolves YouTube and Spotify URLs into a unified `MusicTrack` model; new platforms plug in behind the Paste Link dropdown |
 | Spotify → YouTube pipeline | Two-phase jobs: `source_resolve` (metadata) then `source_match_all` (YouTube search per track) before the existing music download path |
+| Match quality presets | `fast` / `balanced` / `accurate` tune search depth, enrichment, and inter-track delays for large playlists |
+| Failure & retry UX | Failed downloads and matches surface clearly in Recent / track rows with per-item and batch retry |
 | Infinite scroll | Search pagination tracked per-tab with exhaustion flags — no duplicate fetches |
 | macOS scroll handling | Detects Tk version and system scroll preference to avoid trackpad snap-back bugs |
 
@@ -608,6 +643,8 @@ easy-dlp/
 ├── pyproject.toml          # Package metadata and entry point
 ├── requirements.txt        # Pinned-floor dependencies
 ├── cookies.txt.example     # Template for browser cookie export
+├── scripts/
+│   └── check_playlist_matches.py  # CLI: evaluate YouTube match accuracy for a playlist
 ├── docs/
 │   └── screenshots/        # README screenshots (see Features section)
 └── ytdlp_app/
@@ -616,6 +653,8 @@ easy-dlp/
     ├── jobs.py             # Background job queue (search / download / music)
     ├── downloader.py       # yt-dlp wrappers for audio, video, thumbs, music
     ├── search.py           # YouTube search, URL resolve, audio candidate scoring
+    ├── match_config.py     # Match quality presets (fast / balanced / accurate)
+    ├── rate_limit.py       # YouTube rate-limit detection and backoff
     ├── sources/            # Platform registry (YouTube, Spotify, …)
     │   ├── base.py         # MusicTrack model + text fallback parser
     │   ├── youtube.py      # YouTube URL → MusicTrack
