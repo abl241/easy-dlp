@@ -14,7 +14,7 @@
 
 ---
 
-> **For recruiters & reviewers:** Solo-built desktop application spanning UI, background job orchestration, metadata pipelines (iTunes API + ID3 tagging), and media post-processing (ffmpeg). Demonstrates threading/concurrency, API integration, persistent settings, and production-minded UX polish. Jump to [Tech Stack](#tech-stack) or [Project Structure](#project-structure).
+> Solo-built desktop application spanning UI, background job orchestration, metadata pipelines (iTunes API + ID3 tagging), and media post-processing (ffmpeg). Demonstrates threading/concurrency, API integration, persistent settings, and production-minded UX polish. Jump to [Tech Stack](#tech-stack) or [Project Structure](#project-structure).
 
 <br>
 
