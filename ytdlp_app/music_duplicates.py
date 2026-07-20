@@ -105,6 +105,11 @@ def check_music_duplicate(
     if not check_apple_music or not am.is_supported():
         return False, display, ""
 
+    # Without a known artist, library title matching is too fuzzy (any song
+    # whose title contains the query would match).
+    if not artist:
+        return False, display, ""
+
     titles = [title] if title else []
     itunes = search_track(artist, title, duration_s=duration_s, album=album)
     if itunes and itunes.title:

@@ -72,14 +72,15 @@ class MusicDownloadResult:
             self.track_infos = []
 
 
-def _shared_opts(out_dir: str, cookies_path: str | None) -> dict[str, Any]:
+def _shared_opts(out_dir: str, cookies_path: str | None, *, verbose: bool = False) -> dict[str, Any]:
     opts: dict[str, Any] = {
         "outtmpl": str(Path(out_dir) / "%(title)s.%(ext)s"),
         "ignoreerrors": True,
         "retries": 3,
         "socket_timeout": 30,
-        "quiet": True,
+        "quiet": not verbose,
         "no_warnings": False,
+        "verbose": bool(verbose),
     }
     apply_ytdlp_runtime_opts(opts)
     if cookies_path and Path(cookies_path).is_file():
@@ -273,12 +274,13 @@ def download_audio(
     out_dir: str,
     *,
     cookies_path: str | None = None,
+    verbose: bool = False,
     progress: ProgressFn = lambda msg: None,
     on_pct: PctFn | None = None,
     cancel_event: threading.Event | None = None,
 ) -> DownloadResult:
     """Download audio as MP3 with embedded thumbnail + metadata."""
-    opts = _shared_opts(out_dir, cookies_path)
+    opts = _shared_opts(out_dir, cookies_path, verbose=verbose)
     opts.update({
         "format": "bestaudio/best",
         "writethumbnail": True,
@@ -369,9 +371,11 @@ def download_music(
     out_dir: str,
     *,
     cookies_path: str | None = None,
+    verbose: bool = False,
     progress: ProgressFn = lambda msg: None,
     on_pct: PctFn | None = None,
     cancel_event: threading.Event | None = None,
+    prefer_explicit: bool = True,
 ) -> MusicDownloadResult:
     """Download audio as MP3 named by parsed track title.
 
@@ -395,7 +399,11 @@ def download_music(
         parsed = parse_youtube_track(raw_title, uploader)
         duration = raw_info.get("duration")
         duration_s = int(duration) if isinstance(duration, (int, float)) else None
-        itunes = search_track(parsed.artist, parsed.title, duration_s=duration_s)
+        itunes = search_track(
+            parsed.artist, parsed.title,
+            duration_s=duration_s,
+            prefer_explicit=prefer_explicit,
+        )
         filename = sanitize_filename(
             itunes.title if itunes else (parsed.title or raw_title),
         )
@@ -403,7 +411,7 @@ def download_music(
 
         per_paths: list[str] = []
         per_infos: list[MusicTrackInfo] = []
-        opts = _shared_opts(out_dir, cookies_path)
+        opts = _shared_opts(out_dir, cookies_path, verbose=verbose)
         opts.update({
             "format": "bestaudio/best",
             "overwrites": True,
@@ -451,6 +459,7 @@ def download_video(
     out_dir: str,
     *,
     cookies_path: str | None = None,
+    verbose: bool = False,
     progress: ProgressFn = lambda msg: None,
     on_pct: PctFn | None = None,
     cancel_event: threading.Event | None = None,
@@ -460,7 +469,7 @@ def download_video(
     The format selector prefers MP4-compatible streams so we typically only
     remux (much faster) instead of re-encoding.
     """
-    opts = _shared_opts(out_dir, cookies_path)
+    opts = _shared_opts(out_dir, cookies_path, verbose=verbose)
     opts.update({
         "format": "bv*[vcodec!^=vp9]+ba[ext=m4a]/b[ext=mp4]/b",
         "merge_output_format": "mp4",
@@ -480,12 +489,13 @@ def download_thumbnails_only(
     out_dir: str,
     *,
     cookies_path: str | None = None,
+    verbose: bool = False,
     progress: ProgressFn = lambda msg: None,
     on_pct: PctFn | None = None,
     cancel_event: threading.Event | None = None,
 ) -> DownloadResult:
     """Download just the thumbnail image (converted to JPG)."""
-    opts = _shared_opts(out_dir, cookies_path)
+    opts = _shared_opts(out_dir, cookies_path, verbose=verbose)
     opts.update({
         "skip_download": True,
         "writethumbnail": True,

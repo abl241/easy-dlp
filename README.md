@@ -44,7 +44,56 @@
 
 # Installation
 
-> **Start here.** This walkthrough assumes no prior Python experience. Follow each step in order for your operating system.
+> **Start here.** No terminal skills required — double-click to open.
+
+<br>
+
+## Fastest way (recommended)
+
+### macOS
+
+1. Download the project ([ZIP](https://github.com/abl241/easy-dlp/archive/refs/heads/main.zip) or `git clone`) and unzip if needed.
+2. Install the two one-time requirements (copy/paste into Terminal):
+
+   ```bash
+   brew install python@3.12 python-tk@3.12 ffmpeg
+   ```
+
+   Don't have Homebrew yet? Install it from [brew.sh](https://brew.sh), then run the line above.
+3. Open the project folder in Finder and **double-click `easy-dlp`**.
+
+   | What you see | What to do |
+   |:---|:---|
+   | App opens | You're done |
+   | *"macOS cannot verify…"* | Right-click `easy-dlp` → **Open** → **Open** |
+   | Terminal setup messages | Wait — first launch installs packages, then the app opens |
+
+4. *(Optional)* Double-click **`Add easy-dlp to Desktop.command`** once to put a shortcut on your Desktop / Dock.
+
+**Backup opener:** if the app icon won't launch, double-click **`Open easy-dlp.command`** instead.
+
+### Windows
+
+1. Install [Python](https://www.python.org/downloads/windows/) — check **Add python.exe to PATH**, keep **tcl/tk and IDLE**.
+2. Install [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) and add its `bin` folder to PATH.
+3. Download / unzip the project.
+4. Double-click **`Open easy-dlp.bat`**.
+
+First launch creates a private environment and installs dependencies, then opens the app.
+
+### Linux
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv python3-tk ffmpeg
+chmod +x run.sh
+./run.sh
+```
+
+<br>
+
+<details>
+<summary><strong>Need more detail? Step-by-step setup</strong></summary>
 
 <br>
 
@@ -52,11 +101,11 @@
 
 | Requirement | Why you need it |
 |:---|:---|
-| **Git** | Downloads the project from GitHub |
+| **Git** *(optional)* | Downloads the project from GitHub — or use Download ZIP |
 | **Python 3.10+** with **tkinter** | Runs the app and draws the GUI |
-| **ffmpeg** | Converts and muxes audio/video (auto-detected on most systems) |
+| **ffmpeg** | Converts and muxes audio/video |
 
-The included `run.sh` script creates a private Python environment and installs all Python dependencies on first launch.
+On macOS / Linux, `run.sh` (and the double-click launchers) create a private Python environment and install all Python packages on first launch.
 
 <br>
 
@@ -144,7 +193,7 @@ cd easy-dlp
 
 1. On GitHub → **Code** → **Download ZIP**
 2. Unzip the archive
-3. Open a terminal inside the folder
+3. Open the folder in Finder / File Explorer
 
 <br>
 
@@ -180,23 +229,13 @@ sudo apt install ffmpeg
 
 ## Step 3 — Launch
 
-**macOS / Linux**
+| System | Double-click this |
+|:---|:---|
+| **macOS** | `easy-dlp` *(the app icon)* — or `Open easy-dlp.command` |
+| **Windows** | `Open easy-dlp.bat` |
+| **Linux** | run `./run.sh` in a terminal |
 
-```bash
-chmod +x run.sh    # first time only
-./run.sh
-```
-
-**Windows** — use Git Bash, WSL, or run manually:
-
-```bat
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python main.py
-```
-
-On first run, `run.sh` automatically:
+On first run the launcher automatically:
 
 1. Finds Python 3.10+ with tkinter
 2. Creates a `.venv` folder
@@ -205,7 +244,7 @@ On first run, `run.sh` automatically:
 
 <br>
 
-## Step 4 — Verify
+## Step 4 — Verify *(optional)*
 
 ```bash
 ./run.sh --doctor
@@ -213,10 +252,13 @@ On first run, `run.sh` automatically:
 
 | Command | What it does |
 |:---|:---|
-| `./run.sh` | Launch the app |
+| Double-click `easy-dlp` / `Open easy-dlp.*` | Launch the app |
 | `./run.sh --update` | Upgrade dependencies |
 | `./run.sh --reset` | Rebuild `.venv` from scratch |
 | `./run.sh --help` | Show all commands |
+| `Add easy-dlp to Desktop.command` | Put a Desktop shortcut on macOS |
+
+</details>
 
 <br>
 
@@ -506,7 +548,7 @@ Choose **Fast (playlists)**, **Balanced**, or **Accurate** for YouTube matching 
 
 # Quick Start
 
-1. Launch with `./run.sh`
+1. Double-click **`easy-dlp`** (Mac) or **`Open easy-dlp.bat`** (Windows) — or run `./run.sh`
 2. Pick a tab — **Download**, **Music**, or **Embed Thumbnail**
 3. **Download tab:** search YouTube or paste video/playlist URLs → pick formats → download
 4. **Music tab:** search YouTube, paste a YouTube link, or paste a **Spotify** playlist/album URL → match on YouTube → download tagged MP3s
@@ -575,9 +617,11 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 
 | Problem | Fix |
 |:---|:---|
-| `Could not find a Python interpreter with tkinter` | Install `python-tk` / `python3-tk` — see [Step 0](#step-0--check-for-python) |
+| *"macOS cannot verify the developer"* | Right-click `easy-dlp` → **Open** → **Open** (one-time) |
+| App icon does nothing | Double-click `Open easy-dlp.command` instead — it shows errors in Terminal |
+| `Could not find a Python interpreter with tkinter` | Install `python-tk` / `python3-tk` — see [Installation](#installation) |
 | Downloads fail with ffmpeg errors | Run `ffmpeg -version`; install ffmpeg if missing |
-| `run.sh: Permission denied` | Run `chmod +x run.sh` once |
+| `run.sh: Permission denied` | Double-click `Open easy-dlp.command` (it fixes permissions), or run `chmod +x run.sh` |
 | Blank window on launch | Python may lack tkinter — run `./run.sh --doctor` |
 | Age-restricted video fails | Add a cookies file in Settings |
 | Stale yt-dlp / broken downloads | Run `./run.sh --update` or `./run.sh --reset` |
@@ -610,7 +654,7 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 | Concurrency | `threading` + `queue` | Non-blocking UI with a worker job queue |
 | Rate limiting | Exponential backoff | Automatic wait/retry when YouTube throttles requests |
 | Settings | JSON on disk | Persistent, OS-appropriate config directory |
-| Packaging | `run.sh` + venv | One-command setup for non-developers |
+| Packaging | Double-click launchers + `run.sh` | Finder/Explorer friendly; no PyInstaller required |
 
 <br>
 
@@ -638,8 +682,12 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 
 ```
 easy-dlp/
+├── easy-dlp.app/           # macOS double-click app (Finder)
+├── Open easy-dlp.command   # macOS backup launcher (shows Terminal)
+├── Open easy-dlp.bat       # Windows double-click launcher
+├── Add easy-dlp to Desktop.command  # macOS Desktop/Dock shortcut
 ├── main.py                 # Convenience launcher (`python main.py`)
-├── run.sh                  # One-command setup + launch script
+├── run.sh                  # Setup + launch script (used by the apps above)
 ├── pyproject.toml          # Package metadata and entry point
 ├── requirements.txt        # Pinned-floor dependencies
 ├── cookies.txt.example     # Template for browser cookie export
@@ -701,7 +749,9 @@ easy-dlp
 
 # Distributing a Standalone App
 
-Bundle a double-clickable app with [PyInstaller](https://pyinstaller.org/):
+For most people, **no extra build step is needed** — ship the repo as-is and tell users to double-click `easy-dlp` (Mac) or `Open easy-dlp.bat` (Windows).
+
+To bundle a fully self-contained binary with [PyInstaller](https://pyinstaller.org/) (optional, for sharing without Python installed):
 
 ```bash
 .venv/bin/pip install pyinstaller

@@ -23,7 +23,6 @@ dist/
 *.spec
 *.pkg
 *.dmg
-*.app/
 
 ### PyInstaller ###
 *.manifest

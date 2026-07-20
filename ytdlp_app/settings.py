@@ -40,6 +40,7 @@ _DEFAULTS: dict[str, Any] = {
 
     # Optional cookies file
     "cookies_path": "",
+    "verbose": False,
 
     # Music tab
     "music_dir": str(Path.home() / "Music"),
@@ -51,8 +52,12 @@ _DEFAULTS: dict[str, Any] = {
     "music_search_limit": 20,        # 10 | 20 | 50
     "music_download_lyrics": True,
     "music_prefer_audio": True,
+    "music_allow_explicit": True,
     "music_search_audio_only": True,
     "music_use_youtube_music": True,
+    "music_include_albums": True,
+    "music_include_playlists": False,
+    "music_album_search_limit": 5,
     "music_skip_duplicates": False,
     "music_match_quality": "balanced",  # "fast" | "balanced" | "accurate"
     "music_add_to_apple_music": False,
@@ -72,6 +77,8 @@ _DEFAULTS: dict[str, Any] = {
     "panel_recent_collapsed": True,
     "panel_log_collapsed": True,
     "panel_log_height": "normal",    # "normal" | "large" | "xlarge"
+    "panel_active_height": "normal", # "normal" | "large" | "xlarge"
+    "panel_recent_height": "normal", # "normal" | "large" | "xlarge"
     "download_input_collapsed": False,
     "music_input_collapsed": False,
     "music_track_list_expanded": False,

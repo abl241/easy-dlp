@@ -17,6 +17,58 @@ from pathlib import Path
 from typing import Any
 
 
+def project_root() -> Path:
+    """Repo root (parent of the ``ytdlp_app`` package)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def app_icon_path() -> Path | None:
+    """Return ``assets/icon.png`` if present."""
+    candidate = project_root() / "assets" / "icon.png"
+    return candidate if candidate.is_file() else None
+
+
+def set_macos_dock_icon(icon_path: Path | None = None) -> bool:
+    """Replace the Python rocket in the Dock with our app icon (macOS only)."""
+    if sys.platform != "darwin":
+        return False
+    path = icon_path or app_icon_path()
+    if path is None or not path.is_file():
+        return False
+    try:
+        from AppKit import NSApplication, NSImage  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    try:
+        NSApplication.sharedApplication()
+        image = NSImage.alloc().initByReferencingFile_(str(path.resolve()))
+        if image is None or not image.isValid():
+            return False
+        NSApplication.sharedApplication().setApplicationIconImage_(image)
+        return True
+    except Exception:
+        return False
+
+
+def apply_window_icon(root: Any) -> None:
+    """Set the window/taskbar icon from ``assets/icon.png`` when available."""
+    path = app_icon_path()
+    if path is None:
+        return
+    set_macos_dock_icon(path)
+    try:
+        from PIL import Image, ImageTk
+
+        img = Image.open(path).convert("RGBA")
+        img = img.resize((256, 256), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        # Keep a reference on the widget so Tk doesn't garbage-collect it.
+        root._easy_dlp_icon_photo = photo  # noqa: SLF001
+        root.iconphoto(True, photo)
+    except Exception:
+        pass
+
+
 _COMMON_FFMPEG_PATHS = (
     "/opt/homebrew/bin/ffmpeg",       # macOS Apple Silicon Homebrew
     "/usr/local/bin/ffmpeg",          # macOS Intel Homebrew / generic /usr/local

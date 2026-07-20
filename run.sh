@@ -14,6 +14,9 @@
 
 set -euo pipefail
 
+# Finder / .app launches get a tiny PATH; make sure Homebrew is visible.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"
+
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 

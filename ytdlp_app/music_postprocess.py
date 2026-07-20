@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from .metadata.itunes import ITunesTrack, fetch_artwork, search_track
+from .metadata.itunes import ITunesTrack, albums_match, fetch_artwork, search_track
 from .metadata.lyrics import fetch_lyrics
 from .metadata.parse import ParsedTrack, parse_youtube_track
 from .metadata.tagger import apply_itunes_tags, apply_youtube_fallback_tags
@@ -28,6 +28,7 @@ class TrackInfo:
     thumbnail_url: str | None = None
     itunes_match: ITunesTrack | None = None
     source_album: str = ""
+    source_album_artist: str = ""
     source_track_number: int | None = None
     source_disc_number: int | None = None
     source_cover_url: str | None = None
@@ -48,6 +49,7 @@ def process_track(
     track_info: TrackInfo | None = None,
     enrich_metadata: bool = True,
     download_lyrics: bool = True,
+    prefer_explicit: bool = True,
     progress: ProgressFn = lambda msg: None,
     cancel_event: threading.Event | None = None,
 ) -> PostprocessResult:
@@ -74,6 +76,13 @@ def process_track(
     duration_s = info.duration_s
     itunes_match: ITunesTrack | None = info.itunes_match
     artwork: bytes | None = None
+    shared_cover: bytes | None = None
+    if info.source_cover_url:
+        shared_cover = _fetch_url(info.source_cover_url)
+        if shared_cover:
+            progress(
+                f"[music] album cover downloaded ({len(shared_cover) // 1024} KB)",
+            )
 
     if enrich_metadata:
         if itunes_match is None:
@@ -82,9 +91,19 @@ def process_track(
                 parsed.artist, parsed.title,
                 duration_s=duration_s,
                 album=info.source_album,
+                prefer_explicit=prefer_explicit,
             )
         else:
             progress("[music] applying metadata…")
+
+        if itunes_match and info.source_album and not albums_match(
+            info.source_album, itunes_match.album,
+        ):
+            progress(
+                f"[music] iTunes matched '{itunes_match.album}' — "
+                f"expected '{info.source_album}'; using album metadata",
+            )
+            itunes_match = None
 
         if itunes_match:
             metadata_source = "itunes"
@@ -94,18 +113,20 @@ def process_track(
             if itunes_match.duration_ms:
                 duration_s = itunes_match.duration_ms // 1000
             progress(f"[music] matched: {itunes_match.artist} — {itunes_match.title}")
-            artwork = fetch_artwork(itunes_match.artwork_url)
+            artwork = shared_cover or fetch_artwork(itunes_match.artwork_url)
             if artwork:
                 progress(f"[music] cover art downloaded ({len(artwork) // 1024} KB)")
             else:
                 progress("WARN: cover art download failed — trying YouTube thumbnail")
                 artwork = _fetch_url(info.thumbnail_url)
         else:
-            metadata_source = "youtube"
+            metadata_source = "youtube" if not info.source_album else "album"
             progress("[music] no iTunes match — using YouTube metadata")
-            artwork = _fetch_url(info.thumbnail_url)
+            artwork = shared_cover or _fetch_url(info.thumbnail_url)
             if artwork:
                 progress(f"[music] YouTube thumbnail downloaded ({len(artwork) // 1024} KB)")
+            if info.source_album:
+                tag_album = info.source_album
 
     lyrics_plain = ""
     if download_lyrics:
@@ -142,6 +163,7 @@ def process_track(
                     artist=tag_artist or parsed.artist,
                     title=tag_title or parsed.title,
                     album=info.source_album,
+                    album_artist=info.source_album_artist,
                     year=None,
                     genre=None,
                     track_number=info.source_track_number,
@@ -179,6 +201,7 @@ def process_track(
 def _merge_source_metadata(match: ITunesTrack, info: TrackInfo) -> ITunesTrack:
     """Prefer playlist/album source fields over per-song iTunes guesses."""
     album = info.source_album or match.album
+    album_artist = info.source_album_artist or match.album_artist
     track_number = (
         info.source_track_number
         if info.source_track_number is not None
@@ -189,11 +212,17 @@ def _merge_source_metadata(match: ITunesTrack, info: TrackInfo) -> ITunesTrack:
         if info.source_disc_number is not None
         else match.disc_number
     )
-    if album == match.album and track_number == match.track_number and disc_number == match.disc_number:
+    if (
+        album == match.album
+        and album_artist == match.album_artist
+        and track_number == match.track_number
+        and disc_number == match.disc_number
+    ):
         return match
     return replace(
         match,
         album=album,
+        album_artist=album_artist,
         track_number=track_number,
         disc_number=disc_number,
     )

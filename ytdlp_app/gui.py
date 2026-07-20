@@ -33,8 +33,15 @@ from . import __version__, thumbcache
 from .jobs import CANCELLED, DONE, FAILED, Job, JobQueue, QUEUED, RUNNING
 from .metadata.parse import parse_youtube_track
 from .music_duplicates import check_music_duplicate, duplicate_location_label
-from .runtime import find_ffmpeg
-from .search import SearchResult, is_url, resolve_urls
+from .runtime import apply_window_icon, find_ffmpeg
+from .search import (
+    SearchResult,
+    _format_duration,
+    _video_id_from_url,
+    is_url,
+    normalize_collection_title,
+    resolve_urls,
+)
 from .settings import Settings, _config_dir
 from .sources import PLATFORM_CONFIGS, MusicTrack, detect_platform, platform_config
 from .sources.base import MATCH_FAILED, MATCH_PENDING
@@ -64,6 +71,14 @@ _FORMAT_DEFAULT_KEY = {
     "audio": "default_audio",
     "video": "default_video",
     "thumb": "default_thumb",
+}
+_RECENT_KIND_LABEL = {
+    "music": "Music",
+    "audio": "MP3",
+    "video": "Video",
+    "thumb": "Thumb",
+    "embed_single": "Embed",
+    "embed_folder": "Embed",
 }
 
 
@@ -131,6 +146,67 @@ def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _recent_dedupe_key(job: Job) -> str:
+    """One recent row per video/song, even when audio+video+thumb all download."""
+    url = str(job.params.get("url") or job.params.get("source_url") or "")
+    vid = _video_id_from_url(url)
+    if vid:
+        return f"vid:{vid}"
+    artist = (
+        job.params.get("expected_artist")
+        or job.params.get("source_uploader")
+        or ""
+    ).casefold().strip()
+    title = (
+        job.params.get("expected_title")
+        or job.params.get("source_title")
+        or ""
+    ).casefold().strip()
+    if artist or title:
+        return f"music:{artist}\0{title}"
+    return f"{job.kind}:{job.label.casefold()}"
+
+
+def _recent_primary_title(job: Job) -> str:
+    artist = (
+        job.params.get("expected_artist")
+        or job.params.get("source_uploader")
+        or ""
+    ).strip()
+    title = (
+        job.params.get("expected_title")
+        or job.params.get("source_title")
+        or ""
+    ).strip()
+    if artist and title:
+        return f"{artist} — {title}"
+    if title:
+        return title
+    label = job.label or ""
+    for prefix in ("Music:", "AUDIO:", "VIDEO:", "THUMB:"):
+        if label.upper().startswith(prefix.upper()):
+            return label[len(prefix):].strip()
+    return label or "(untitled)"
+
+
+def _recent_metadata_line(job: Job, kinds: list[str]) -> str:
+    bits: list[str] = []
+    album = str(job.params.get("source_album") or "").strip()
+    if album:
+        bits.append(album)
+    duration = job.params.get("source_duration_s") or job.params.get("expected_duration_s")
+    if isinstance(duration, (int, float)) and int(duration) > 0:
+        bits.append(_format_duration(int(duration)))
+    fmt_labels = []
+    for kind in kinds:
+        label = _RECENT_KIND_LABEL.get(kind, kind.capitalize())
+        if label not in fmt_labels:
+            fmt_labels.append(label)
+    if fmt_labels:
+        bits.append(", ".join(fmt_labels))
+    return " · ".join(bits)
+
+
 # ============================================================================
 # Main window
 # ============================================================================
@@ -148,6 +224,8 @@ class App(ctk.CTk):
         h = int(self.settings.get("window_height") or 960)
         self.geometry(f"{w}x{h}")
         self.minsize(900, 720)
+        # After Tk is up — AppKit before CTk() crashes Tk 9 on macOS.
+        apply_window_icon(self)
 
         # ----- inter-thread message queue ----- #
         self._msg_q: queue.Queue[Job] = queue.Queue()
@@ -161,7 +239,7 @@ class App(ctk.CTk):
         # ----- model state ----- #
         self.results: list[SearchResult] = []
         self._active_rows: dict[int, _ActiveRow] = {}
-        self._recent_rows: dict[int, _RecentRow] = {}
+        self._recent_rows: dict[str, "_RecentRow"] = {}
         self._result_rows: list[_ResultRow] = []
 
         # Infinite-scroll state: only populated when the most recent op that
@@ -189,15 +267,32 @@ class App(ctk.CTk):
         self._music_search_loading_more: bool = False
         self._music_search_more_exhausted: bool = False
         self._music_search_page_size: int = 20
+        self._music_track_count: int = 0
+        self._music_album_count: int = 0
+        self._music_albums_exhausted: bool = False
         self._music_search_audio_only: bool = bool(
             self.settings.get("music_search_audio_only"),
         )
         self._music_use_youtube_music: bool = bool(
             self.settings.get("music_use_youtube_music"),
         )
+        self._music_search_include_albums: bool = bool(
+            self.settings.get("music_include_albums", True),
+        )
+        self._music_stream_job_id: int | None = None
+        self._music_match_job_id: int | None = None
         self._music_loading_more_label: ctk.CTkLabel | None = None
+        self._music_scroll_footer: ctk.CTkButton | None = None
+        self._search_scroll_footer: ctk.CTkButton | None = None
+        self._results_scroll_sync_pending: dict[int, str | None] = {}
         self._music_alternate_open_index: int | None = None
         self._music_alternate_panels: dict[int, "_MusicAlternatePanel"] = {}
+
+        # Prevent duplicate side-effects when terminal jobs are notified more
+        # than once (e.g. nested Tk dialogs while the message queue drains).
+        self._terminal_side_effects_handled: set[int] = set()
+        self._pending_collection_urls: set[str] = set()
+        self._batch_duplicate_dialog_open = False
 
         # Log panel state
         self._last_logged: dict[int, str] = {}
@@ -229,7 +324,7 @@ class App(ctk.CTk):
     # ====================== UI construction =================================
 
     def _build_tabs(self) -> None:
-        self.tabs = ctk.CTkTabview(self)
+        self.tabs = ctk.CTkTabview(self, command=self._on_main_tab_changed)
         self.tabs.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
         self.download_tab = self.tabs.add("Download")
@@ -318,6 +413,7 @@ class App(ctk.CTk):
         res_outer.grid(row=2, column=0, sticky="nsew", padx=8, pady=(4, 8))
         res_outer.grid_columnconfigure(0, weight=1)
         res_outer.grid_rowconfigure(1, weight=1)
+        res_outer.grid_rowconfigure(2, weight=0)
 
         header = ctk.CTkFrame(res_outer, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 2))
@@ -337,9 +433,19 @@ class App(ctk.CTk):
             side="right", padx=2,
         )
 
-        self.results_frame = ctk.CTkScrollableFrame(res_outer)
-        self.results_frame.grid(row=1, column=0, sticky="nsew",
-                                padx=6, pady=(0, 6))
+        self._download_results_body = ctk.CTkFrame(res_outer, fg_color="transparent")
+        self._download_results_body.grid(row=1, column=0, sticky="nsew", padx=6, pady=0)
+        self._download_results_body.grid_columnconfigure(0, weight=1)
+        self._download_results_body.grid_rowconfigure(0, weight=1)
+
+        self.results_frame = ctk.CTkScrollableFrame(self._download_results_body)
+        self.results_frame.pack(fill="both", expand=True)
+        self._bind_results_scroll_resize(self._download_results_body, self.results_frame)
+        self.results_footer = ctk.CTkFrame(
+            res_outer, fg_color="transparent", height=0,
+        )
+        self.results_footer.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 6))
+        self._bind_results_pagination_watch(self.results_frame)
         self._render_results()
 
     def _build_search_subtab(self, parent) -> None:
@@ -434,11 +540,20 @@ class App(ctk.CTk):
         self.music_prefer_audio_var = ctk.BooleanVar(
             value=bool(self.settings.get("music_prefer_audio")),
         )
+        self.music_allow_explicit_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_allow_explicit", True)),
+        )
         self.music_search_audio_only_var = ctk.BooleanVar(
             value=bool(self.settings.get("music_search_audio_only")),
         )
         self.music_use_youtube_music_var = ctk.BooleanVar(
             value=bool(self.settings.get("music_use_youtube_music")),
+        )
+        self.music_include_albums_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_include_albums", True)),
+        )
+        self.music_include_playlists_var = ctk.BooleanVar(
+            value=bool(self.settings.get("music_include_playlists", False)),
         )
         self.music_skip_duplicates_var = ctk.BooleanVar(
             value=bool(self.settings.get("music_skip_duplicates")),
@@ -468,7 +583,11 @@ class App(ctk.CTk):
                 False if use_ytm
                 else bool(self.music_search_audio_only_var.get())
             ),
+            "include_albums": bool(self.music_include_albums_var.get()) if use_ytm else False,
+            "include_playlists": bool(self.music_include_playlists_var.get()) if use_ytm else False,
+            "album_limit": max(1, int(self.settings.get("music_album_search_limit") or 5)),
             "match_quality": self._match_quality_key(),
+            "allow_explicit": bool(self.music_allow_explicit_var.get()),
         }
 
     def _match_quality_key(self) -> str:
@@ -492,6 +611,7 @@ class App(ctk.CTk):
             "music_use_youtube_music", self.music_use_youtube_music_var.get(),
         )
         self._update_music_search_audio_state()
+        self._update_music_collection_search_state()
 
     def _update_music_search_audio_state(self) -> None:
         cb = getattr(self, "_music_search_audio_only_cb", None)
@@ -501,6 +621,16 @@ class App(ctk.CTk):
             cb.configure(state="disabled")
         else:
             cb.configure(state="normal")
+
+    def _update_music_collection_search_state(self) -> None:
+        """Enable/disable album/playlist search toggles based on YTM mode."""
+        for attr in ("_music_include_albums_cb", "_music_include_playlists_cb"):
+            cb = getattr(self, attr, None)
+            if cb is None:
+                continue
+            cb.configure(
+                state="normal" if self.music_use_youtube_music_var.get() else "disabled",
+            )
 
     def _build_music_settings_options(self, parent: ctk.CTkFrame) -> None:
         """Music download/search options shown on the Settings tab."""
@@ -531,6 +661,16 @@ class App(ctk.CTk):
             variable=self.music_prefer_audio_var,
             command=lambda: self.settings.set(
                 "music_prefer_audio", self.music_prefer_audio_var.get(),
+            ),
+        ).pack(anchor="w")
+
+        row = opt_row()
+        ctk.CTkCheckBox(
+            row,
+            text="Allow explicit audio (prefer explicit over clean versions)",
+            variable=self.music_allow_explicit_var,
+            command=lambda: self.settings.set(
+                "music_allow_explicit", self.music_allow_explicit_var.get(),
             ),
         ).pack(anchor="w")
 
@@ -576,13 +716,18 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             parent,
             text=("Lyrics and prefer-audio options apply when downloading. "
+                  "Allow explicit prefers labeled explicit uploads and iTunes "
+                  "catalog entries over clean / radio-edit versions (on by "
+                  "default). Turn it off to prefer clean versions instead. "
                   "Search prefer-audio is disabled while YouTube Music search "
-                  "is on (Music tab). Match quality controls playlist speed "
-                  "vs accuracy — Fast reduces YouTube requests on large playlists."),
+                  "is on (Music tab). Album/playlist search toggles live on "
+                  "the Music tab. Match quality controls playlist speed vs "
+                  "accuracy — Fast reduces YouTube requests on large playlists."),
             text_color=("gray40", "gray70"), wraplength=820, justify="left",
         ).pack(fill="x", padx=14, pady=(0, 8), anchor="w")
 
         self._update_music_search_audio_state()
+        self._update_music_collection_search_state()
 
     def _build_music_tab(self, parent) -> None:
         self._create_music_option_vars()
@@ -593,20 +738,22 @@ class App(ctk.CTk):
 
         opts_frame = ctk.CTkFrame(parent)
         opts_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        opts_top = ctk.CTkFrame(opts_frame, fg_color="transparent")
+        opts_top.pack(fill="x")
         ctk.CTkLabel(
-            opts_frame, text="Music mode:", anchor="w",
+            opts_top, text="Music mode:", anchor="w",
             font=ctk.CTkFont(weight="bold"),
         ).pack(side="left", padx=(10, 8), pady=6)
 
         ctk.CTkCheckBox(
-            opts_frame,
+            opts_top,
             text="Use YouTube Music",
             variable=self.music_use_youtube_music_var,
             command=self._on_music_use_youtube_music_change,
         ).pack(side="left", padx=8, pady=6)
 
         ctk.CTkCheckBox(
-            opts_frame,
+            opts_top,
             text="Skip duplicates",
             variable=self.music_skip_duplicates_var,
             command=lambda: self.settings.set(
@@ -616,23 +763,50 @@ class App(ctk.CTk):
 
         if sys.platform == "darwin":
             ctk.CTkCheckBox(
-                opts_frame,
+                opts_top,
                 text="Add to Apple Music",
                 variable=self.music_add_to_apple_music_var,
                 command=self._on_add_to_apple_music_change,
             ).pack(side="left", padx=8, pady=6)
 
         ctk.CTkLabel(
-            opts_frame,
+            opts_top,
             text="MP3 · title filename · metadata auto-applied",
             text_color=("gray40", "gray70"),
         ).pack(side="left", padx=(4, 8), pady=6)
 
         ctk.CTkButton(
-            opts_frame, text="Music settings…", width=130,
+            opts_top, text="Music settings…", width=130,
             fg_color="transparent", border_width=1,
             command=lambda: self.tabs.set("Settings"),
         ).pack(side="right", padx=10, pady=6)
+
+        opts_search = ctk.CTkFrame(opts_frame, fg_color="transparent")
+        opts_search.pack(fill="x", padx=10, pady=(0, 6))
+        self._music_include_albums_cb = ctk.CTkCheckBox(
+            opts_search,
+            text="Include albums in search",
+            variable=self.music_include_albums_var,
+            command=lambda: self.settings.set(
+                "music_include_albums", self.music_include_albums_var.get(),
+            ),
+        )
+        self._music_include_albums_cb.pack(side="left", padx=(0, 12))
+        self._music_include_playlists_cb = ctk.CTkCheckBox(
+            opts_search,
+            text="Include playlists in search",
+            variable=self.music_include_playlists_var,
+            command=lambda: self.settings.set(
+                "music_include_playlists", self.music_include_playlists_var.get(),
+            ),
+        )
+        self._music_include_playlists_cb.pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(
+            opts_search,
+            text="(YouTube Music search only)",
+            text_color=("gray40", "gray70"),
+        ).pack(side="left")
+        self._update_music_collection_search_state()
 
         self._music_input_collapsed = bool(
             self.settings.get("music_input_collapsed"),
@@ -668,6 +842,7 @@ class App(ctk.CTk):
         res_outer.grid(row=2, column=0, sticky="nsew", padx=8, pady=(4, 8))
         res_outer.grid_columnconfigure(0, weight=1)
         res_outer.grid_rowconfigure(1, weight=1)
+        res_outer.grid_rowconfigure(2, weight=0)
 
         header = ctk.CTkFrame(res_outer, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 2))
@@ -709,9 +884,20 @@ class App(ctk.CTk):
             side="right", padx=2,
         )
 
-        self.music_results_frame = ctk.CTkScrollableFrame(res_outer)
-        self.music_results_frame.grid(row=1, column=0, sticky="nsew",
-                                      padx=6, pady=(0, 6))
+        self._music_results_body = ctk.CTkFrame(res_outer, fg_color="transparent")
+        self._music_results_body.grid(row=1, column=0, sticky="nsew", padx=6, pady=0)
+        self._music_results_body.grid_columnconfigure(0, weight=1)
+        self._music_results_body.grid_rowconfigure(0, weight=1)
+
+        self.music_results_frame = ctk.CTkScrollableFrame(self._music_results_body)
+        self.music_results_frame.pack(fill="both", expand=True)
+        self._bind_results_scroll_resize(self._music_results_body, self.music_results_frame)
+        self.music_results_footer = ctk.CTkFrame(
+            res_outer, fg_color="transparent", height=0,
+        )
+        self.music_results_footer.grid(row=2, column=0, sticky="ew",
+                                       padx=6, pady=(0, 6))
+        self._bind_results_pagination_watch(self.music_results_frame)
         self._music_render_results()
 
     def _build_music_search_subtab(self, parent) -> None:
@@ -865,6 +1051,7 @@ class App(ctk.CTk):
             self.source_tabs.pack(fill="x")
             self._download_input_toggle_btn.configure(text="Hide input ▾")
         self.settings.set("download_input_collapsed", collapsed)
+        self._schedule_results_scroll_height_sync()
 
     def _toggle_download_input(self) -> None:
         self._set_download_input_collapsed(not self._download_input_collapsed)
@@ -872,6 +1059,54 @@ class App(ctk.CTk):
     def _collapse_download_input_if_results(self) -> None:
         if self.results:
             self._set_download_input_collapsed(True)
+
+    def _sync_results_scroll_frame_height(self, body, frame) -> None:
+        """Resize a CTkScrollableFrame viewport to fill its grid body."""
+        try:
+            body.update_idletasks()
+            h = int(body.winfo_height())
+            if h < 40:
+                return
+            if abs(int(frame.cget("height")) - h) > 4:
+                frame.configure(height=h)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _sync_all_results_scroll_heights(self) -> None:
+        download_body = getattr(self, "_download_results_body", None)
+        download_frame = getattr(self, "results_frame", None)
+        if download_body is not None and download_frame is not None:
+            self._sync_results_scroll_frame_height(download_body, download_frame)
+        music_body = getattr(self, "_music_results_body", None)
+        music_frame = getattr(self, "music_results_frame", None)
+        if music_body is not None and music_frame is not None:
+            self._sync_results_scroll_frame_height(music_body, music_frame)
+
+    def _schedule_results_scroll_height_sync(self) -> None:
+        """Re-sync after layout settles (tab switch, collapse, new rows)."""
+        self.after_idle(lambda: self._sync_all_results_scroll_heights())
+        self.after(120, lambda: self._sync_all_results_scroll_heights())
+
+    def _bind_results_scroll_resize(self, body, frame) -> None:
+        """Keep CTkScrollableFrame canvas sized to its grid-allocated body."""
+        key = id(body)
+
+        def _schedule_sync(_event=None) -> None:
+            job = self._results_scroll_sync_pending.get(key)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._results_scroll_sync_pending[key] = self.after_idle(
+                lambda b=body, f=frame: self._sync_results_scroll_frame_height(b, f),
+            )
+
+        body.bind("<Configure>", _schedule_sync)
+        _schedule_sync()
+
+    def _on_main_tab_changed(self) -> None:
+        self._schedule_results_scroll_height_sync()
 
     def _set_music_input_collapsed(self, collapsed: bool) -> None:
         self._music_input_collapsed = collapsed
@@ -882,6 +1117,7 @@ class App(ctk.CTk):
             self.music_source_tabs.pack(fill="x")
             self._music_input_toggle_btn.configure(text="Hide input ▾")
         self.settings.set("music_input_collapsed", collapsed)
+        self._schedule_results_scroll_height_sync()
 
     def _toggle_music_input(self) -> None:
         self._set_music_input_collapsed(not self._music_input_collapsed)
@@ -1053,6 +1289,21 @@ class App(ctk.CTk):
             text_color=("gray40", "gray70"), wraplength=820, justify="left",
         ).pack(fill="x", padx=14, pady=(0, 8), anchor="w")
 
+        s_debug = section("Debug")
+        row = ctk.CTkFrame(s_debug, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=(4, 8))
+        self.verbose_var = ctk.BooleanVar(value=bool(self.settings.get("verbose")))
+
+        def on_verbose() -> None:
+            self.settings.set("verbose", bool(self.verbose_var.get()))
+
+        ctk.CTkCheckBox(
+            row,
+            text="Verbose logging (shows yt-dlp debug output)",
+            variable=self.verbose_var,
+            command=on_verbose,
+        ).pack(anchor="w")
+
         # Downloads
         s_dl = section("Downloads")
 
@@ -1182,13 +1433,29 @@ class App(ctk.CTk):
     _RECENT_EXPANDED_H = 110
     _COLLAPSED_H = 36
 
+    _PANEL_HEIGHTS = {"normal": None, "large": None, "xlarge": None}
+
+    def _panel_height_map(self) -> dict[str, int]:
+        # Derive heights from the log mapping for consistent UI feel.
+        return {"normal": 130, "large": 280, "xlarge": 450}
+
+    def _active_expanded_height(self) -> int:
+        key = str(self.settings.get("panel_active_height") or "normal")
+        heights = self._panel_height_map()
+        return heights.get(key, self._ACTIVE_EXPANDED_H)
+
+    def _recent_expanded_height(self) -> int:
+        key = str(self.settings.get("panel_recent_height") or "normal")
+        heights = self._panel_height_map()
+        return heights.get(key, self._RECENT_EXPANDED_H)
+
     def _log_expanded_height(self) -> int:
         return _LOG_HEIGHTS.get(self._log_height, _LOG_HEIGHTS["normal"])
 
     def _build_active_panel(self) -> None:
         # Fixed-height outer so an empty CTkScrollableFrame doesn't claim
         # 250+px of vertical space and squash the tabs above it.
-        outer = ctk.CTkFrame(self, height=self._ACTIVE_EXPANDED_H)
+        outer = ctk.CTkFrame(self, height=self._active_expanded_height())
         outer.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
         outer.pack_propagate(False)
         self._active_outer = outer
@@ -1200,6 +1467,18 @@ class App(ctk.CTk):
             font=ctk.CTkFont(weight="bold"),
         )
         self.active_header.pack(side="left", padx=4)
+        self._active_size_btn = ctk.CTkButton(
+            header, text=str(self.settings.get("panel_active_height") or "normal").capitalize(),
+            width=90, fg_color="transparent", border_width=1,
+            command=self._cycle_active_height,
+        )
+        self._active_size_btn.pack(side="right", padx=2)
+        self._active_popout_btn = ctk.CTkButton(
+            header, text="Pop out", width=80,
+            fg_color="transparent", border_width=1,
+            command=self._toggle_active_popout,
+        )
+        self._active_popout_btn.pack(side="right", padx=2)
         self._active_toggle_btn = ctk.CTkButton(
             header, text="Hide ▾", width=80,
             command=self._toggle_active,
@@ -1216,7 +1495,7 @@ class App(ctk.CTk):
             self._toggle_active()
 
     def _build_recent_panel(self) -> None:
-        outer = ctk.CTkFrame(self, height=self._RECENT_EXPANDED_H)
+        outer = ctk.CTkFrame(self, height=self._recent_expanded_height())
         outer.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
         outer.pack_propagate(False)
         self._recent_outer = outer
@@ -1230,6 +1509,18 @@ class App(ctk.CTk):
             font=ctk.CTkFont(weight="bold"),
         )
         self.recent_header.pack(side="left", padx=4)
+        self._recent_size_btn = ctk.CTkButton(
+            header, text=str(self.settings.get("panel_recent_height") or "normal").capitalize(),
+            width=90, fg_color="transparent", border_width=1,
+            command=self._cycle_recent_height,
+        )
+        self._recent_size_btn.pack(side="right", padx=2)
+        self._recent_popout_btn = ctk.CTkButton(
+            header, text="Pop out", width=80,
+            fg_color="transparent", border_width=1,
+            command=self._toggle_recent_popout,
+        )
+        self._recent_popout_btn.pack(side="right", padx=2)
         self._recent_toggle_btn = ctk.CTkButton(
             header, text="Hide ▾", width=80,
             command=self._toggle_recent,
@@ -1341,6 +1632,7 @@ class App(ctk.CTk):
         params: dict[str, Any] = {
             "download_lyrics": bool(self.music_lyrics_var.get()),
             "prefer_audio": bool(self.music_prefer_audio_var.get()),
+            "allow_explicit": bool(self.music_allow_explicit_var.get()),
             "enrich_metadata": True,
         }
         if hasattr(self, "music_add_to_apple_music_var"):
@@ -1362,6 +1654,7 @@ class App(ctk.CTk):
         track: MusicTrack | None = None,
     ) -> None:
         params = self._music_job_params()
+        params["verbose"] = bool(self.settings.get("verbose"))
         if track is not None:
             params["expected_artist"] = track.artist
             params["expected_title"] = track.title
@@ -1372,6 +1665,7 @@ class App(ctk.CTk):
             params["source_duration_s"] = track.duration_s
             params["source_thumbnail_url"] = track.cover_url or track.thumbnail_url
             params["source_album"] = track.album
+            params["source_album_artist"] = track.album_artist
             params["source_track_number"] = track.track_number
             params["source_disc_number"] = track.disc_number
             params["source_cover_url"] = track.cover_url
@@ -1436,17 +1730,11 @@ class App(ctk.CTk):
     def _notify_skipped_duplicates(self, names: list[str]) -> None:
         if not names:
             return
-        preview = "\n".join(f"  • {n}" for n in names[:15])
-        extra = f"\n  … and {len(names) - 15} more" if len(names) > 15 else ""
-        self._set_status(f"Skipped {len(names)} duplicate(s)")
         if self._music_skip_duplicates_checks_apple_music():
             where = "library or output folder"
         else:
-            where = "folder"
-        messagebox.showinfo(
-            "Skipped duplicates",
-            f"Skipped {len(names)} track(s) already in {where}:\n\n{preview}{extra}",
-        )
+            where = "output folder"
+        self._set_status(f"Skipped {len(names)} duplicate(s) already in {where}.")
 
     def _maybe_enqueue_music_download(
         self,
@@ -1562,9 +1850,17 @@ class App(ctk.CTk):
                 )
             return
 
-        action = self._ask_batch_duplicate_action(
-            [display for *_, display in skipped], out_dir,
-        )
+        if self._batch_duplicate_dialog_open:
+            self._set_status("Duplicate check already in progress…")
+            return
+
+        skipped_names = list(dict.fromkeys(display for *_, display in skipped))
+        self._batch_duplicate_dialog_open = True
+        try:
+            action = self._ask_batch_duplicate_action(skipped_names, out_dir)
+        finally:
+            self._batch_duplicate_dialog_open = False
+
         if action == "cancel":
             self._set_status("Download cancelled.")
             return
@@ -1576,7 +1872,7 @@ class App(ctk.CTk):
                 )
             return
 
-        self._notify_skipped_duplicates([display for *_, display in skipped])
+        self._notify_skipped_duplicates(skipped_names)
         for url, label, result, track in to_enqueue:
             self._enqueue_music_download(
                 url, label,
@@ -1616,6 +1912,7 @@ class App(ctk.CTk):
             cookies_path=cookies,
             videos_only=self._search_videos_only,
             audio_only=self._search_audio_only,
+            verbose=bool(self.settings.get("verbose")),
         )
 
     def _music_do_search(self) -> None:
@@ -1633,22 +1930,32 @@ class App(ctk.CTk):
         self._music_search_query = None
         self._music_search_loading_more = False
         self._music_search_more_exhausted = False
+        self._music_track_count = 0
+        self._music_album_count = 0
+        self._music_albums_exhausted = False
         self._music_search_page_size = max(10, limit)
         self._music_pending_search_query = query if not is_url(query) else None
         search_params = self._music_search_job_params()
         self._music_search_audio_only = search_params["audio_only"]
         self._music_use_youtube_music = search_params["use_youtube_music"]
+        self._music_search_include_albums = search_params["include_albums"]
         self.music_tracks = []
         self._music_showing_tracks = False
+        self.music_results = []
+        self._set_music_input_collapsed(True)
+        self.music_results_header_label.configure(text="Results — searching…")
+        self._music_render_results()
         label = f"Music search: {query[:60]}"
-        self.jobs.enqueue(
+        job = self.jobs.enqueue(
             kind="search", label=label,
             query=query, limit=limit,
             cookies_path=cookies,
             videos_only=True,
             results_context="music",
+            verbose=bool(self.settings.get("verbose")),
             **search_params,
         )
+        self._music_stream_job_id = job.id
 
     def _do_resolve(self) -> None:
         text = self.paste_box.get("1.0", "end").strip()
@@ -1731,6 +2038,7 @@ class App(ctk.CTk):
             if not out_override:
                 return  # user cancelled
         cookies = self.settings.get("cookies_path") or None
+        verbose = bool(self.settings.get("verbose"))
         for url in urls:
             for fmt in formats:
                 out_dir = out_override or self.settings.get(_FORMAT_DIR_KEY[fmt])
@@ -1746,6 +2054,7 @@ class App(ctk.CTk):
                     kind=fmt, label=label,
                     url=url, output_dir=out_dir,
                     cookies_path=cookies,
+                    verbose=verbose,
                 )
 
     def _music_paste_download_all(self, *, override: bool) -> None:
@@ -1788,6 +2097,7 @@ class App(ctk.CTk):
             return
 
         cookies = self.settings.get("cookies_path") or None
+        verbose = bool(self.settings.get("verbose"))
         items: list[tuple[str, str, SearchResult | None, MusicTrack | None]] = []
         if self.music_prefer_audio_var.get():
             for raw_url in urls:
@@ -1803,6 +2113,7 @@ class App(ctk.CTk):
             for url in urls:
                 label = f"Music: {_truncate(url, 80)}"
                 items.append((url, label, None, None))
+        # `verbose` is forwarded via each enqueued track's job params.
         self._enqueue_music_downloads_batch(out_dir, cookies, items)
 
     def _download_one(self, result: SearchResult, *, override: bool) -> None:
@@ -1816,6 +2127,7 @@ class App(ctk.CTk):
             if not out_override:
                 return
         cookies = self.settings.get("cookies_path") or None
+        verbose = bool(self.settings.get("verbose"))
         for fmt in formats:
             out_dir = out_override or self.settings.get(_FORMAT_DIR_KEY[fmt])
             if not out_dir:
@@ -1830,6 +2142,7 @@ class App(ctk.CTk):
                 kind=fmt, label=label,
                 url=result.url, output_dir=out_dir,
                 cookies_path=cookies,
+                verbose=verbose,
             )
 
     def _music_download_one(self, result: SearchResult, *, override: bool) -> None:
@@ -1851,6 +2164,49 @@ class App(ctk.CTk):
             result.url, label, out_dir=out_dir, cookies=cookies, result=result,
         )
 
+    def _music_download_collection(self, result: SearchResult, *, override: bool) -> None:
+        """Download an album/playlist by expanding it into per-track URLs."""
+        if result.kind not in ("album", "playlist"):
+            self._music_download_one(result, override=override)
+            return
+
+        out_override = None
+        if override:
+            out_override = _pick_folder()
+            if not out_override:
+                return
+        out_dir = out_override or self.settings.get("music_dir")
+        if not out_dir:
+            messagebox.showinfo(
+                "Missing output folder",
+                "Configure a music output folder in Settings.",
+            )
+            return
+
+        cookies = self.settings.get("cookies_path") or None
+        verbose = bool(self.settings.get("verbose"))
+        collection_url = result.url.strip()
+        if collection_url in self._pending_collection_urls:
+            self._set_status("Already expanding this collection…")
+            return
+        self._pending_collection_urls.add(collection_url)
+        kind_label = "Album" if result.kind == "album" else "Playlist"
+        label = f"{kind_label}: expand {result.display_title(60)}"
+        self.jobs.enqueue(
+            kind="resolve",
+            label=label,
+            urls=[collection_url],
+            cookies_path=cookies,
+            verbose=verbose,
+            results_context=f"music_{result.kind}_expand",
+            out_dir=out_dir,
+            collection_title=result.title,
+            collection_artist=result.uploader,
+            collection_thumbnail_url=result.thumbnail_url,
+            collection_kind=result.kind,
+            collection_url=collection_url,
+        )
+
     def _download_all(self, *, override: bool) -> None:
         if not self.results:
             self._set_status("No results to download.")
@@ -1865,6 +2221,7 @@ class App(ctk.CTk):
             if not out_override:
                 return
         cookies = self.settings.get("cookies_path") or None
+        verbose = bool(self.settings.get("verbose"))
         for result in self.results:
             for fmt in formats:
                 out_dir = out_override or self.settings.get(_FORMAT_DIR_KEY[fmt])
@@ -1880,6 +2237,7 @@ class App(ctk.CTk):
                     kind=fmt, label=label,
                     url=result.url, output_dir=out_dir,
                     cookies_path=cookies,
+                    verbose=verbose,
                 )
 
     def _music_download_one_track(self, track: MusicTrack, *, override: bool) -> None:
@@ -1915,7 +2273,7 @@ class App(ctk.CTk):
             return
         cookies = self.settings.get("cookies_path") or None
         self._music_auto_download = False
-        self.jobs.enqueue(
+        job = self.jobs.enqueue(
             kind="source_match_all",
             label=f"Match {len(pending)} track(s) on YouTube",
             tracks=[t.to_dict() for t in self.music_tracks],
@@ -1923,6 +2281,7 @@ class App(ctk.CTk):
             results_context="music",
             **self._music_search_job_params(),
         )
+        self._music_match_job_id = job.id
 
     def _music_retry_track(self, track_index: int) -> None:
         if track_index < 0 or track_index >= len(self.music_tracks):
@@ -1992,7 +2351,7 @@ class App(ctk.CTk):
                     return
                 self._music_pending_out_dir = out_dir
                 cookies = self.settings.get("cookies_path") or None
-                self.jobs.enqueue(
+                job = self.jobs.enqueue(
                     kind="source_match_all",
                     label=f"Match {len(pending)} track(s) on YouTube",
                     tracks=[t.to_dict() for t in self.music_tracks],
@@ -2001,6 +2360,7 @@ class App(ctk.CTk):
                     auto_download=True,
                     **self._music_search_job_params(),
                 )
+                self._music_match_job_id = job.id
                 return
             if not downloadable:
                 self._set_status("No matched tracks to download.")
@@ -2044,7 +2404,11 @@ class App(ctk.CTk):
                 None,
             )
             for result in self.music_results
+            if result.kind == "track"
         ]
+        if not items:
+            self._set_status("No tracks to download (albums/playlists need Download album).")
+            return
         self._enqueue_music_downloads_batch(out_dir, cookies, items)
 
     # ====================== Rendering ======================================
@@ -2064,6 +2428,9 @@ class App(ctk.CTk):
             self.results_header_label.configure(
                 text="Results (0) — search or paste a URL above"
             )
+        self._update_search_scroll_footer()
+        self._schedule_scroll_bottom_check()
+        self._schedule_results_scroll_height_sync()
 
     def _clear_results(self) -> None:
         self.results = []
@@ -2145,6 +2512,64 @@ class App(ctk.CTk):
             self.music_results_header_label.configure(
                 text="Results (0) — search or paste a link above",
             )
+        self._music_update_scroll_footer()
+        self._schedule_scroll_bottom_check()
+        self._schedule_results_scroll_height_sync()
+
+    def _music_track_tally(self) -> int:
+        """Song rows in the current music search (excludes album/playlist rows)."""
+        return sum(
+            1 for r in self.music_results
+            if r.kind not in ("album", "playlist")
+        )
+
+    def _music_update_scroll_footer(self) -> None:
+        if self._music_scroll_footer is not None:
+            try:
+                self._music_scroll_footer.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+            self._music_scroll_footer = None
+        track_count = self._music_track_tally()
+        if track_count > self._music_track_count:
+            self._music_track_count = track_count
+        if (
+            self._music_search_query
+            and not self._music_search_more_exhausted
+            and not self._music_showing_tracks
+            and self._music_track_count >= self._music_search_page_size
+        ):
+            self._music_scroll_footer = ctk.CTkButton(
+                self.music_results_footer,
+                text="Load more results",
+                command=self._music_load_more_results,
+                fg_color="transparent",
+                border_width=1,
+                text_color=("gray20", "gray80"),
+            )
+            self._music_scroll_footer.pack(fill="x", padx=8, pady=4)
+
+    def _update_search_scroll_footer(self) -> None:
+        if self._search_scroll_footer is not None:
+            try:
+                self._search_scroll_footer.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+            self._search_scroll_footer = None
+        if (
+            self._search_query
+            and not self._search_more_exhausted
+            and len(self.results) >= self._search_page_size
+        ):
+            self._search_scroll_footer = ctk.CTkButton(
+                self.results_footer,
+                text="Load more results",
+                command=self._load_more_results,
+                fg_color="transparent",
+                border_width=1,
+                text_color=("gray20", "gray80"),
+            )
+            self._search_scroll_footer.pack(fill="x", padx=8, pady=4)
 
     def _music_new_link(self) -> None:
         """Clear the current playlist/results and show the paste/search input."""
@@ -2209,6 +2634,9 @@ class App(ctk.CTk):
         self._music_alternate_panels.clear()
         self.music_results = []
         self.music_tracks = []
+        self._music_track_count = 0
+        self._music_album_count = 0
+        self._music_albums_exhausted = False
         self._music_showing_tracks = False
         self._music_auto_download = False
         self._music_pending_out_dir = None
@@ -2220,28 +2648,66 @@ class App(ctk.CTk):
 
     # ====================== Infinite scroll =================================
 
+    def _bind_results_pagination_watch(
+        self, scroll_frame: ctk.CTkScrollableFrame,
+    ) -> None:
+        """Re-check pagination when result rows change the scrollable height."""
+        pending: list[str | None] = [None]
+
+        def _on_configure(_event=None) -> None:
+            job = pending[0]
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:  # noqa: BLE001
+                    pass
+            pending[0] = self.after(60, self._check_scroll_bottom)
+
+        try:
+            scroll_frame.bind("<Configure>", _on_configure, add="+")
+            scroll_frame._parent_canvas.bind("<Configure>", _on_configure, add="+")  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _schedule_scroll_bottom_check(self) -> None:
+        """Re-check after layout settles (rows/footer may not have size yet)."""
+        self.after_idle(self._check_scroll_bottom)
+        self.after(120, self._check_scroll_bottom)
+        self.after(350, self._check_scroll_bottom)
+
     def _scroll_frame_near_bottom(
         self,
         scroll_frame: ctk.CTkScrollableFrame,
         *,
-        item_count: int,
+        loaded_count: int,
         page_size: int,
     ) -> bool:
         """True when the user has scrolled near the end, or all items are visible."""
+        if loaded_count < page_size:
+            return False
         try:
             canvas = scroll_frame._parent_canvas  # noqa: SLF001
-            inner = scroll_frame._parent_frame  # noqa: SLF001
+            scroll_frame.update_idletasks()
             canvas.update_idletasks()
-            _top, bottom = canvas.yview()
+            top, bottom = canvas.yview()
             view_h = canvas.winfo_height()
-            inner_h = inner.winfo_reqheight()
-            if inner_h <= view_h + 4:
-                return item_count >= page_size
-            return bottom >= 0.90
+            if view_h <= 1:
+                return False
+            bbox = canvas.bbox("all")
+            if not bbox:
+                return False
+            content_h = bbox[3] - bbox[1]
+            if content_h <= view_h + 8:
+                return True
+            if bottom >= 0.88:
+                return True
+            # yview fractions can stall slightly below 1.0 on macOS/CTk.
+            visible_bottom = (top * content_h) + view_h
+            return visible_bottom >= content_h - 24
         except (AttributeError, ValueError, Exception):  # noqa: BLE001
             return False
 
-    def _poll_scroll_bottom(self) -> None:
+    def _check_scroll_bottom(self) -> None:
         """Detect when the user has scrolled near the bottom of results
         and kick off a `search_more` job to append the next page."""
         try:
@@ -2250,11 +2716,11 @@ class App(ctk.CTk):
                     self._search_query
                     and not self._search_loading_more
                     and not self._search_more_exhausted
-                    and self.results
+                    and len(self.results) >= self._search_page_size
                 ):
                     if self._scroll_frame_near_bottom(
                         self.results_frame,
-                        item_count=len(self.results),
+                        loaded_count=len(self.results),
                         page_size=self._search_page_size,
                     ):
                         self._load_more_results()
@@ -2264,20 +2730,29 @@ class App(ctk.CTk):
                     and self._music_search_query
                     and not self._music_search_loading_more
                     and not self._music_search_more_exhausted
-                    and self.music_results
+                    and self._music_track_count >= self._music_search_page_size
                 ):
                     if self._scroll_frame_near_bottom(
                         self.music_results_frame,
-                        item_count=len(self.music_results),
+                        loaded_count=self._music_track_count,
                         page_size=self._music_search_page_size,
                     ):
                         self._music_load_more_results()
         except (AttributeError, ValueError):
             pass
+
+    def _poll_scroll_bottom(self) -> None:
+        self._check_scroll_bottom()
         self.after(400, self._poll_scroll_bottom)
 
     def _load_more_results(self) -> None:
-        if not self._search_query or self._search_loading_more:
+        if not self._search_query:
+            self._set_status("Load more is only available for text searches.")
+            return
+        if self._search_loading_more:
+            return
+        if self._search_more_exhausted:
+            self._set_status("No more results.")
             return
         self._search_loading_more = True
         already_loaded = len(self.results)
@@ -2298,12 +2773,21 @@ class App(ctk.CTk):
         )
 
     def _music_load_more_results(self) -> None:
-        if not self._music_search_query or self._music_search_loading_more:
+        if not self._music_search_query:
+            self._set_status("Load more is only available for text searches.")
+            return
+        if self._music_search_loading_more:
+            return
+        if self._music_search_more_exhausted:
+            self._set_status("No more results.")
             return
         self._music_search_loading_more = True
-        already_loaded = len(self.music_results)
+        already_loaded = self._music_track_count
         new_limit = already_loaded + self._music_search_page_size
         cookies = self.settings.get("cookies_path") or None
+        album_fetch = 0
+        if self._music_search_include_albums and not self._music_albums_exhausted:
+            album_fetch = 2
         self._music_show_loading_indicator(
             f"Loading more results ({already_loaded} → {new_limit})...",
         )
@@ -2313,21 +2797,28 @@ class App(ctk.CTk):
             query=self._music_search_query,
             limit=new_limit,
             already_loaded=already_loaded,
+            album_offset=self._music_album_count,
+            album_fetch_count=album_fetch,
             cookies_path=cookies,
             videos_only=True,
             results_context="music",
+            verbose=bool(self.settings.get("verbose")),
+            use_youtube_music=self._music_use_youtube_music,
             audio_only=self._music_search_audio_only,
-            use_youtube_music=getattr(self, "_music_use_youtube_music", False),
+            album_limit=max(
+                1, int(self.settings.get("music_album_search_limit") or 5),
+            ),
+            include_albums=bool(album_fetch),
+            include_playlists=False,
         )
 
     def _show_loading_indicator(self, text: str) -> None:
         self._clear_loading_indicator()
         self._loading_more_label = ctk.CTkLabel(
-            self.results_frame, text=text,
+            self.results_footer, text=text,
             text_color=("gray40", "gray70"),
         )
-        self._loading_more_label.pack(fill="x", padx=8, pady=8)
-        self._bind_results_mousewheel(self._loading_more_label)
+        self._loading_more_label.pack(fill="x", padx=8, pady=4)
 
     def _clear_loading_indicator(self) -> None:
         if self._loading_more_label is not None:
@@ -2339,12 +2830,16 @@ class App(ctk.CTk):
 
     def _music_show_loading_indicator(self, text: str) -> None:
         self._music_clear_loading_indicator()
+        if self._music_scroll_footer is not None:
+            try:
+                self._music_scroll_footer.pack_forget()
+            except Exception:  # noqa: BLE001
+                pass
         self._music_loading_more_label = ctk.CTkLabel(
-            self.music_results_frame, text=text,
+            self.music_results_footer, text=text,
             text_color=("gray40", "gray70"),
         )
-        self._music_loading_more_label.pack(fill="x", padx=8, pady=8)
-        self._bind_results_mousewheel(self._music_loading_more_label)
+        self._music_loading_more_label.pack(fill="x", padx=8, pady=4)
 
     def _music_clear_loading_indicator(self) -> None:
         if self._music_loading_more_label is not None:
@@ -2353,17 +2848,27 @@ class App(ctk.CTk):
             except Exception:  # noqa: BLE001
                 pass
             self._music_loading_more_label = None
+        self._music_update_scroll_footer()
 
     def _append_more_results(self, new_items: list[SearchResult]) -> None:
         for r in new_items:
             self.results.append(r)
             self._result_rows.append(_ResultRow(self.results_frame, r, self))
         self.results_header_label.configure(text=f"Results ({len(self.results)})")
+        self._update_search_scroll_footer()
+        self._schedule_scroll_bottom_check()
+        self._schedule_results_scroll_height_sync()
 
-    def _music_append_more_results(self, new_items: list[SearchResult]) -> None:
+    def _music_append_more_results(
+        self,
+        new_tracks: list[SearchResult],
+        new_albums: list[SearchResult] | None = None,
+    ) -> None:
         self._music_showing_tracks = False
         self.music_tracks = []
-        for r in new_items:
+        if new_albums:
+            self._music_insert_album_results(new_albums)
+        for r in new_tracks:
             self.music_results.append(r)
             self._music_result_rows.append(
                 _ResultRow(
@@ -2374,6 +2879,166 @@ class App(ctk.CTk):
         self.music_results_header_label.configure(
             text=f"Results ({len(self.music_results)})",
         )
+        self._music_update_scroll_footer()
+        self._schedule_scroll_bottom_check()
+        self._schedule_results_scroll_height_sync()
+
+    def _music_insert_album_results(self, new_albums: list[SearchResult]) -> None:
+        if not new_albums:
+            return
+        last_album_idx = -1
+        for i, r in enumerate(self.music_results):
+            if r.kind in ("album", "playlist"):
+                last_album_idx = i
+        insert_at = last_album_idx + 1 if last_album_idx >= 0 else min(3, len(self.music_results))
+        for offset, album in enumerate(new_albums):
+            self.music_results.insert(insert_at + offset, album)
+        self._music_rebuild_result_rows_from(insert_at)
+
+    def _music_rebuild_result_rows_from(self, start_index: int) -> None:
+        for row in self._music_result_rows[start_index:]:
+            row.destroy()
+        self._music_result_rows = self._music_result_rows[:start_index]
+        for i in range(start_index, len(self.music_results)):
+            r = self.music_results[i]
+            self._music_result_rows.append(
+                _ResultRow(
+                    self.music_results_frame, r, self, mode="music",
+                    result_index=i,
+                ),
+            )
+
+    def _music_apply_partial_search(self, job: Job) -> None:
+        if job.id != self._music_stream_job_id:
+            return
+        payload = job.result
+        if not isinstance(payload, dict) or not payload.get("partial"):
+            return
+        phase = str(payload.get("phase") or "")
+        items: list[SearchResult] = list(payload.get("items") or [])
+        if phase == "tracks":
+            self.music_results = list(items)
+            self._music_showing_tracks = False
+            self._music_track_count = len(items)
+            self.music_tracks = []
+            self._music_render_results()
+            self.music_results_header_label.configure(
+                text=f"Results ({len(self.music_results)}) — loading albums…",
+            )
+            self._collapse_music_input_if_results()
+        elif phase == "collections" and items:
+            if any(r.kind in ("album", "playlist") for r in self.music_results):
+                self._music_update_collections(items)
+            else:
+                self._music_insert_album_results(items)
+            self._music_album_count = sum(
+                1 for r in self.music_results if r.kind in ("album", "playlist")
+            )
+            self.music_results_header_label.configure(
+                text=f"Results ({len(self.music_results)}) — loading details…",
+            )
+        elif phase == "enrich_tracks" and items:
+            self._music_update_enriched_tracks(items)
+            self.music_results_header_label.configure(
+                text=f"Results ({len(self.music_results)}) — finishing…",
+            )
+        self._schedule_results_scroll_height_sync()
+
+    def _music_update_collections(self, collections: list[SearchResult]) -> None:
+        by_url = {(r.kind, r.url): r for r in collections if r.url}
+        for i, r in enumerate(self.music_results):
+            if r.kind not in ("album", "playlist"):
+                continue
+            key = (r.kind, r.url)
+            new_r = by_url.get(key)
+            if new_r is None:
+                continue
+            self.music_results[i] = new_r
+            if i < len(self._music_result_rows):
+                self._music_result_rows[i].update_result(new_r)
+
+    def _music_update_enriched_tracks(self, enriched: list[SearchResult]) -> None:
+        track_idx = 0
+        for i, r in enumerate(self.music_results):
+            if r.kind in ("album", "playlist"):
+                continue
+            if track_idx >= len(enriched):
+                break
+            new_r = enriched[track_idx]
+            track_idx += 1
+            self.music_results[i] = new_r
+            if i < len(self._music_result_rows):
+                self._music_result_rows[i].update_result(new_r)
+
+    def _music_apply_partial_match(self, job: Job) -> None:
+        if job.id != self._music_match_job_id:
+            return
+        from .sources.base import MusicTrack
+
+        tracks = [
+            t if isinstance(t, MusicTrack) else MusicTrack.from_dict(t)
+            for t in job.result
+        ]
+        self._music_showing_tracks = True
+        self.music_results = []
+        if not self._music_track_rows:
+            self.music_tracks = tracks
+            self._music_render_results()
+            self._collapse_music_input_if_results()
+            return
+        old = self.music_tracks
+        self.music_tracks = tracks
+        for i, (new_t, old_t) in enumerate(zip(tracks, old)):
+            if (
+                new_t.match_status != old_t.match_status
+                or new_t.youtube_url != old_t.youtube_url
+            ):
+                self._music_refresh_track_row(i, new_t)
+        self._music_update_match_header()
+
+    def _music_refresh_track_row(self, index: int, track: MusicTrack) -> None:
+        if index < 0 or index >= len(self._music_track_rows):
+            return
+        alt_open = index == self._music_alternate_open_index
+        self._music_track_rows[index].destroy()
+        self._music_track_rows[index] = _MusicTrackRow(
+            self.music_results_frame, track, self,
+            track_index=index, alternate_open=alt_open,
+        )
+
+    def _music_update_match_header(self) -> None:
+        if not self.music_tracks:
+            return
+        matched = sum(1 for t in self.music_tracks if t.is_downloadable())
+        failed = sum(1 for t in self.music_tracks if t.match_status == MATCH_FAILED)
+        pending = sum(1 for t in self.music_tracks if t.match_status == MATCH_PENDING)
+        header = f"Tracks ({len(self.music_tracks)})"
+        if pending:
+            header += f" — matching: {matched} done, {pending} left"
+        elif failed:
+            header += f" — {matched} matched, {failed} failed"
+        else:
+            header += f" — {matched} ready"
+        self.music_results_header_label.configure(text=header)
+
+    def _add_recent_job(self, job: Job) -> None:
+        key = _recent_dedupe_key(job)
+        row = self._recent_rows.get(key)
+        if row is not None:
+            row.merge(job)
+        else:
+            row = _RecentRow(self.recent_frame, job, self)
+            self._recent_rows[key] = row
+        ids_sorted = sorted(
+            self._recent_rows.keys(),
+            key=lambda k: self._recent_rows[k].latest_job_id,
+            reverse=True,
+        )
+        for excess_key in ids_sorted[10:]:
+            rr = self._recent_rows.pop(excess_key, None)
+            if rr is not None:
+                rr.frame.destroy()
+        self._reorder_recent_rows()
 
     # ====================== Job listener ===================================
 
@@ -2405,6 +3070,19 @@ class App(ctk.CTk):
             # has visible feedback without watching the bottom panel.
             # search_more updates the dedicated bottom indicator instead.
             ctx = job.params.get("results_context", "download")
+            if (
+                job.kind == "search"
+                and ctx == "music"
+                and isinstance(job.result, dict)
+                and job.result.get("partial")
+            ):
+                self._music_apply_partial_search(job)
+            elif (
+                job.kind == "source_match_all"
+                and ctx == "music"
+                and isinstance(job.result, list)
+            ):
+                self._music_apply_partial_match(job)
             if job.kind == "search" and ctx in ("music_rematch", "music_search_rematch"):
                 panel = self._music_alternate_panels.get(
                     job.params.get("track_index"),
@@ -2460,12 +3138,117 @@ class App(ctk.CTk):
                         self._set_status(f"Alternate search failed: {job.error}")
                     elif job.state == CANCELLED and panel is not None:
                         panel.set_searching("Cancelled")
+                elif job.state == DONE and isinstance(job.result, list) and ctx in ("music_album_expand", "music_playlist_expand"):
+                    if job.id in self._terminal_side_effects_handled:
+                        pass
+                    else:
+                        self._terminal_side_effects_handled.add(job.id)
+                        from dataclasses import replace
+
+                        from .metadata.parse import parse_youtube_track
+                        from .sources.base import MusicTrack
+
+                        collection_url = str(job.params.get("collection_url") or "").strip()
+                        if collection_url:
+                            self._pending_collection_urls.discard(collection_url)
+
+                        out_dir = str(job.params.get("out_dir") or self.settings.get("music_dir") or "")
+                        if not out_dir:
+                            self._set_status("Missing music output folder.")
+                        else:
+                            cookies = job.params.get("cookies_path") or None
+                            collection_title = str(job.params.get("collection_title") or "").strip()
+                            collection_artist = str(
+                                job.params.get("collection_artist") or ""
+                            ).strip()
+                            collection_cover_url = str(
+                                job.params.get("collection_thumbnail_url") or ""
+                            ).strip() or None
+                            tracks = [r for r in job.result if isinstance(r, SearchResult)]
+                            items: list[tuple[str, str, SearchResult | None, MusicTrack | None]] = []
+                            seen_urls: set[str] = set()
+                            for track_num, r in enumerate(tracks, start=1):
+                                if not r.url:
+                                    continue
+                                mt = MusicTrack.from_search_result(r)
+                                parsed = parse_youtube_track(r.title, r.uploader)
+                                artist = (
+                                    collection_artist
+                                    or parsed.artist
+                                    or mt.artist
+                                )
+                                title = parsed.title or mt.title or r.title
+                                if artist or title:
+                                    mt = replace(
+                                        mt,
+                                        artist=artist,
+                                        title=title,
+                                    )
+                                mt = replace(
+                                    mt,
+                                    album=normalize_collection_title(collection_title),
+                                    album_artist=collection_artist,
+                                    track_number=track_num,
+                                    cover_url=collection_cover_url or mt.cover_url,
+                                )
+                                label = f"Music: {_truncate(mt.display_title(60), 60)}"
+                                url = (mt.youtube_url or r.url).strip()
+                                if not url or url in seen_urls:
+                                    continue
+                                seen_urls.add(url)
+                                items.append((url, label, None, mt))
+                            if not items:
+                                self._set_status("No tracks found to download.")
+                            else:
+                                # Defer so nested dialogs don't re-enter the
+                                # message queue while this handler is active.
+                                def _start_batch(
+                                    od=out_dir,
+                                    ck=cookies,
+                                    batch_items=items,
+                                    title=collection_title,
+                                ) -> None:
+                                    self._enqueue_music_downloads_batch(od, ck, batch_items)
+                                    self._set_status(
+                                        f"Queued {len(batch_items)} track(s) "
+                                        f"from {title or 'collection'}.",
+                                    )
+
+                                self.after(0, _start_batch)
+
+                elif job.state in (FAILED, CANCELLED) and ctx in ("music_album_expand", "music_playlist_expand"):
+                    collection_url = str(job.params.get("collection_url") or "").strip()
+                    if collection_url:
+                        self._pending_collection_urls.discard(collection_url)
+
                 elif job.state == DONE and isinstance(job.result, list):
                     if ctx == "music":
-                        self.music_results = list(job.result)
+                        had_stream = job.id == self._music_stream_job_id
+                        self._music_stream_job_id = None
+                        prior = list(self.music_results)
+                        final = list(job.result)
+                        self.music_results = final
+                        self._music_track_count = self._music_track_tally()
+                        self._music_album_count = sum(
+                            1 for r in self.music_results
+                            if r.kind in ("album", "playlist")
+                        )
+                        self._music_albums_exhausted = False
+                        if self._music_use_youtube_music and self._music_search_include_albums:
+                            album_limit = max(
+                                1,
+                                int(self.settings.get("music_album_search_limit") or 5),
+                            )
+                            if self._music_album_count < album_limit:
+                                self._music_albums_exhausted = True
                         self.music_tracks = []
                         self._music_showing_tracks = False
-                        self._music_render_results()
+                        if had_stream and prior == final and self._music_result_rows:
+                            self.music_results_header_label.configure(
+                                text=f"Results ({len(final)})",
+                            )
+                        else:
+                            self._music_render_results()
                         self._collapse_music_input_if_results()
                     else:
                         self.results = list(job.result)
@@ -2476,16 +3259,30 @@ class App(ctk.CTk):
                     )
                     if job.kind == "search":
                         if ctx == "music":
-                            self._music_search_query = self._music_pending_search_query
+                            pending = self._music_pending_search_query
+                            raw_query = str(job.params.get("query") or "").strip()
+                            self._music_search_query = pending or (
+                                raw_query if raw_query and not is_url(raw_query) else None
+                            )
                             self._music_pending_search_query = None
+                            fetched = int(job.params.get("limit") or self._music_search_page_size)
+                            if self._music_track_count < fetched:
+                                self._music_search_more_exhausted = True
+                            self._music_update_scroll_footer()
                         else:
                             self._search_query = self._pending_search_query
                             self._pending_search_query = None
+                            if len(self.results) < self._search_page_size:
+                                self._search_more_exhausted = True
+                            self._update_search_scroll_footer()
+                        self._schedule_scroll_bottom_check()
                     elif ctx == "music":
                         self._music_search_query = None
                     else:
                         self._search_query = None
                 elif job.state == FAILED:
+                    if ctx == "music" and job.kind == "search":
+                        self._music_stream_job_id = None
                     hdr = (
                         self.music_results_header_label
                         if ctx == "music"
@@ -2494,6 +3291,8 @@ class App(ctk.CTk):
                     hdr.configure(text=f"Results — {job.kind} failed")
                     self._set_status(f"{job.kind.capitalize()} failed: {job.error}")
                 elif job.state == CANCELLED:
+                    if ctx == "music" and job.kind == "search":
+                        self._music_stream_job_id = None
                     hdr = (
                         self.music_results_header_label
                         if ctx == "music"
@@ -2523,7 +3322,7 @@ class App(ctk.CTk):
                     )
                     if self._music_auto_download and self.music_tracks:
                         cookies = self.settings.get("cookies_path") or None
-                        self.jobs.enqueue(
+                        job = self.jobs.enqueue(
                             kind="source_match_all",
                             label=f"Match {len(self.music_tracks)} track(s) on YouTube",
                             tracks=[t.to_dict() for t in self.music_tracks],
@@ -2532,6 +3331,7 @@ class App(ctk.CTk):
                             auto_download=True,
                             **self._music_search_job_params(),
                         )
+                        self._music_match_job_id = job.id
                 elif job.state == FAILED:
                     self._music_auto_download = False
                     self._music_pending_out_dir = None
@@ -2548,6 +3348,7 @@ class App(ctk.CTk):
                 if ctx != "music":
                     pass
                 elif job.state == DONE and isinstance(job.result, list):
+                    self._music_match_job_id = None
                     from .sources.base import MusicTrack
 
                     self.music_tracks = [
@@ -2565,6 +3366,7 @@ class App(ctk.CTk):
                         self._music_auto_download = False
                         self._music_pending_out_dir = None
                 elif job.state == FAILED:
+                    self._music_match_job_id = None
                     self._music_auto_download = False
                     self._music_pending_out_dir = None
                     self.music_results_header_label.configure(
@@ -2572,6 +3374,7 @@ class App(ctk.CTk):
                     )
                     self._set_status(f"Match failed: {job.error}")
                 elif job.state == CANCELLED:
+                    self._music_match_job_id = None
                     self._music_auto_download = False
                     self._music_pending_out_dir = None
 
@@ -2584,42 +3387,81 @@ class App(ctk.CTk):
                 else:
                     self._search_loading_more = False
                     self._clear_loading_indicator()
-                if job.state == DONE and isinstance(job.result, list):
-                    already = int(job.params.get("already_loaded", 0))
-                    new_items = job.result[already:]
-                    if new_items:
+                if job.state == DONE and job.result is not None:
+                    if isinstance(job.result, dict):
                         if ctx == "music":
-                            self._music_append_more_results(new_items)
-                            self._set_status(
-                                f"Loaded {len(new_items)} more "
-                                f"(total {len(self.music_results)}).",
-                            )
+                            new_tracks = list(job.result.get("tracks") or [])
+                            new_albums = list(job.result.get("albums") or [])
+                            if job.result.get("albums_exhausted"):
+                                self._music_albums_exhausted = True
+                            if job.result.get("tracks_exhausted"):
+                                self._music_search_more_exhausted = True
+                            if new_tracks or new_albums:
+                                self._music_append_more_results(new_tracks, new_albums)
+                                self._music_track_count += len(new_tracks)
+                                self._music_album_count += len(new_albums)
+                                parts = []
+                                if new_tracks:
+                                    parts.append(f"{len(new_tracks)} song(s)")
+                                if new_albums:
+                                    parts.append(f"{len(new_albums)} album(s)")
+                                self._set_status(
+                                    f"Loaded {' and '.join(parts)} "
+                                    f"(total {len(self.music_results)}).",
+                                )
+                            else:
+                                self._music_search_more_exhausted = True
+                                self._set_status("No more results.")
                         else:
-                            self._append_more_results(new_items)
-                            self._set_status(
-                                f"Loaded {len(new_items)} more "
-                                f"(total {len(self.results)}).",
-                            )
-                    elif ctx == "music":
-                        self._music_search_more_exhausted = True
-                        self._set_status("No more results.")
-                    else:
-                        self._search_more_exhausted = True
-                        self._set_status("No more results.")
+                            new_items = list(job.result.get("tracks") or [])
+                            if job.result.get("tracks_exhausted"):
+                                self._search_more_exhausted = True
+                            if new_items:
+                                self._append_more_results(new_items)
+                                self._set_status(
+                                    f"Loaded {len(new_items)} more "
+                                    f"(total {len(self.results)}).",
+                                )
+                            else:
+                                self._search_more_exhausted = True
+                                self._set_status("No more results.")
+                    elif isinstance(job.result, list):
+                        already = int(job.params.get("already_loaded", 0))
+                        new_items = job.result[already:]
+                        if new_items:
+                            if ctx == "music":
+                                self._music_append_more_results(new_items)
+                                self._music_track_count += sum(
+                                    1 for r in new_items if r.kind == "track"
+                                )
+                                self._set_status(
+                                    f"Loaded {len(new_items)} more "
+                                    f"(total {len(self.music_results)}).",
+                                )
+                            else:
+                                self._append_more_results(new_items)
+                                self._set_status(
+                                    f"Loaded {len(new_items)} more "
+                                    f"(total {len(self.results)}).",
+                                )
+                        elif ctx == "music":
+                            self._music_search_more_exhausted = True
+                            self._set_status("No more results.")
+                        else:
+                            self._search_more_exhausted = True
+                            self._set_status("No more results.")
                 elif job.state == FAILED:
                     self._set_status(f"Load more failed: {job.error}")
                 elif job.state == CANCELLED:
                     pass
+                if ctx == "music":
+                    self._music_update_scroll_footer()
+                else:
+                    self._update_search_scroll_footer()
+                self._schedule_scroll_bottom_check()
             else:
-                # Download/embed: add to recent
-                self._recent_rows[job.id] = _RecentRow(self.recent_frame, job, self)
-                # Cap recent to last 10
-                ids_sorted = sorted(self._recent_rows.keys(), reverse=True)
-                for excess_id in ids_sorted[10:]:
-                    rr = self._recent_rows.pop(excess_id, None)
-                    if rr is not None:
-                        rr.frame.destroy()
-                self._reorder_recent_rows()
+                # Download/embed: add to recent (deduped by video/song)
+                self._add_recent_job(job)
                 if job.state == FAILED:
                     self._set_status(f"[fail] {job.label}: {job.error}")
                 elif job.state == CANCELLED:
@@ -2646,6 +3488,23 @@ class App(ctk.CTk):
     #
     # The set of "scrollable canvases" is collected at build time from our
     # three CTkScrollableFrames: results, active downloads, recent jobs.
+
+    def _hook_results_canvas_scroll(self, canvas) -> None:
+        """Fire pagination checks when the results list is scrolled any way."""
+        try:
+            orig_cmd = canvas.cget("yscrollcommand")
+        except Exception:  # noqa: BLE001
+            return
+
+        def _wrapped(first, last, _orig=orig_cmd) -> None:
+            if _orig:
+                canvas.tk.call(_orig, first, last)
+            self._schedule_scroll_bottom_check()
+
+        try:
+            canvas.configure(yscrollcommand=_wrapped)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _setup_scroll_forwarding(self) -> None:
         import os
@@ -2689,6 +3548,15 @@ class App(ctk.CTk):
             except AttributeError:
                 pass
 
+        self._results_scroll_canvases: set = set()
+        for frame in (self.results_frame, self.music_results_frame):
+            try:
+                canvas = frame._parent_canvas  # noqa: SLF001
+                self._results_scroll_canvases.add(canvas)
+                self._hook_results_canvas_scroll(canvas)
+            except AttributeError:
+                pass
+
         def _find_target_canvas(widget):
             seen = 0
             while widget is not None and seen < 100:
@@ -2702,6 +3570,8 @@ class App(ctk.CTk):
             try:
                 before = canvas.yview()
                 canvas.yview_scroll(units, "units")
+                if canvas in self._results_scroll_canvases:
+                    self._schedule_scroll_bottom_check()
                 if debug:
                     after = canvas.yview()
                     def _recheck(c=canvas, b=before, a=after, u=units):
@@ -2980,6 +3850,53 @@ class App(ctk.CTk):
         font = ctk.CTkFont(size=13 if self._log_height != "normal" else 12)
         self.log_box.configure(font=font)
 
+    def _cycle_active_height(self) -> None:
+        cycle = list(_LOG_HEIGHT_CYCLE)
+        cur = str(self.settings.get("panel_active_height") or "normal")
+        if cur not in cycle:
+            cur = "normal"
+        idx = cycle.index(cur)
+        nxt = cycle[(idx + 1) % len(cycle)]
+        self.settings.set("panel_active_height", nxt)
+        self._active_size_btn.configure(text=nxt.capitalize())
+        if not self._active_collapsed:
+            self._active_outer.configure(height=self._active_expanded_height())
+
+    def _cycle_recent_height(self) -> None:
+        cycle = list(_LOG_HEIGHT_CYCLE)
+        cur = str(self.settings.get("panel_recent_height") or "normal")
+        if cur not in cycle:
+            cur = "normal"
+        idx = cycle.index(cur)
+        nxt = cycle[(idx + 1) % len(cycle)]
+        self.settings.set("panel_recent_height", nxt)
+        self._recent_size_btn.configure(text=nxt.capitalize())
+        if not self._recent_collapsed:
+            self._recent_outer.configure(height=self._recent_expanded_height())
+
+    def _toggle_active_popout(self) -> None:
+        if getattr(self, "_active_popout", None) is not None:
+            try:
+                if self._active_popout.winfo_exists():
+                    self._active_popout.focus()
+                    return
+            except Exception:  # noqa: BLE001
+                self._active_popout = None
+        self._active_popout = _JobsPopout(self, title="Active downloads", kind="active")
+        # Auto-hide in main window while popped out
+        self._active_outer.pack_forget()
+
+    def _toggle_recent_popout(self) -> None:
+        if getattr(self, "_recent_popout", None) is not None:
+            try:
+                if self._recent_popout.winfo_exists():
+                    self._recent_popout.focus()
+                    return
+            except Exception:  # noqa: BLE001
+                self._recent_popout = None
+        self._recent_popout = _JobsPopout(self, title="Recent", kind="recent")
+        self._recent_outer.pack_forget()
+
     def _toggle_log_popout(self) -> None:
         if self._log_popout is not None:
             try:
@@ -2996,23 +3913,22 @@ class App(ctk.CTk):
         self.jobs.enqueue(kind=job.kind, label=job.label, **params)
 
     def _retry_all_failed_recent(self) -> None:
-        failed = [
-            row.job for row in self._recent_rows.values()
-            if row.job.state == FAILED
-        ]
-        if not failed:
+        failed_jobs: list[Job] = []
+        for row in self._recent_rows.values():
+            failed_jobs.extend(row.failed_jobs())
+        if not failed_jobs:
             return
-        for job in failed:
+        for job in failed_jobs:
             self._retry_job(job)
-        self._set_status(f"Retrying {len(failed)} failed job(s)…")
+        self._set_status(f"Retrying {len(failed_jobs)} failed job(s)…")
 
     def _update_recent_header(self) -> None:
         total = len(self._recent_rows)
         failed = sum(
-            1 for r in self._recent_rows.values() if r.job.state == FAILED
+            1 for r in self._recent_rows.values() if r.has_failed()
         )
         cancelled = sum(
-            1 for r in self._recent_rows.values() if r.job.state == CANCELLED
+            1 for r in self._recent_rows.values() if r.is_all_cancelled()
         )
         ok = total - failed - cancelled
         if total == 0:
@@ -3038,7 +3954,12 @@ class App(ctk.CTk):
     def _reorder_recent_rows(self) -> None:
         rows = list(self._recent_rows.values())
         state_order = {FAILED: 0, CANCELLED: 1, DONE: 2}
-        rows.sort(key=lambda r: (state_order.get(r.job.state, 3), -r.job.id))
+        rows.sort(
+            key=lambda r: (
+                state_order.get(r.worst_state(), 3),
+                -r.latest_job_id,
+            ),
+        )
         for row in rows:
             row.frame.pack_forget()
         for row in rows:
@@ -3159,11 +4080,26 @@ class _MusicAlternateResultRow:
 
         text_col = ctk.CTkFrame(self.frame, fg_color="transparent")
         text_col.pack(side="left", fill="x", expand=True, padx=2, pady=4)
+        title_row = ctk.CTkFrame(text_col, fg_color="transparent")
+        title_row.pack(fill="x")
+        rating_badge = result.content_rating_badge()
+        if rating_badge:
+            ctk.CTkLabel(
+                title_row,
+                text=rating_badge,
+                width=16,
+                anchor="center",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=(
+                    ("#3d7a4a", "#7eb888") if rating_badge == "C"
+                    else ("#9a4a4a", "#c88888")
+                ),
+            ).pack(side="left", padx=(0, 4))
         ctk.CTkLabel(
-            text_col, text=result.display_title(80),
+            title_row, text=result.display_title(80),
             anchor="w", font=ctk.CTkFont(weight="bold"),
             wraplength=420, justify="left",
-        ).pack(fill="x")
+        ).pack(side="left", fill="x", expand=True)
         meta = result.metadata_line()
         if meta:
             ctk.CTkLabel(
@@ -3501,9 +4437,14 @@ class _ResultRow:
         self._alternate_panel: _MusicAlternatePanel | None = None
 
         if mode == "music":
-            download_fn = lambda: app._music_download_one(result, override=False)
-            folder_fn = lambda: app._music_download_one(result, override=True)
-            btn_text = "Download"
+            if result.kind in ("album", "playlist"):
+                download_fn = lambda: app._music_download_collection(result, override=False)
+                folder_fn = lambda: app._music_download_collection(result, override=True)
+                btn_text = "Download album" if result.kind == "album" else "Download playlist"
+            else:
+                download_fn = lambda: app._music_download_one(result, override=False)
+                folder_fn = lambda: app._music_download_one(result, override=True)
+                btn_text = "Download"
             self.outer = ctk.CTkFrame(parent, fg_color="transparent")
             self.outer.pack(fill="x", padx=4, pady=3)
             row_parent = self.outer
@@ -3531,22 +4472,52 @@ class _ResultRow:
         # Title + metadata (center).
         text_col = ctk.CTkFrame(self.frame, fg_color="transparent")
         text_col.pack(side="left", fill="x", expand=True, padx=2, pady=6)
-        ctk.CTkLabel(
-            text_col, text=result.display_title(),
-            anchor="w", font=ctk.CTkFont(weight="bold"),
-            wraplength=500, justify="left",
-        ).pack(fill="x")
-        meta = result.metadata_line()
-        if meta:
+
+        title_row = ctk.CTkFrame(text_col, fg_color="transparent")
+        title_row.pack(fill="x")
+        if result.kind in ("album", "playlist"):
+            badge = result.kind.upper()
             ctk.CTkLabel(
+                title_row,
+                text=badge,
+                width=78,
+                anchor="w",
+                text_color=("gray30", "gray70"),
+            ).pack(side="left", padx=(0, 6))
+        rating_badge = result.content_rating_badge()
+        if rating_badge:
+            ctk.CTkLabel(
+                title_row,
+                text=rating_badge,
+                width=16,
+                anchor="center",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=(
+                    ("#3d7a4a", "#7eb888") if rating_badge == "C"
+                    else ("#9a4a4a", "#c88888")
+                ),
+            ).pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(
+            title_row,
+            text=result.display_title(),
+            anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+            wraplength=500,
+            justify="left",
+        ).pack(side="left", fill="x", expand=True)
+        meta = result.metadata_line()
+        self._meta_label: ctk.CTkLabel | None = None
+        if meta:
+            self._meta_label = ctk.CTkLabel(
                 text_col, text=meta, anchor="w",
                 text_color=("gray40", "gray70"),
-            ).pack(fill="x")
+            )
+            self._meta_label.pack(fill="x")
 
         # Action buttons (right).
         btn_col = ctk.CTkFrame(self.frame, fg_color="transparent")
         btn_col.pack(side="right", padx=6, pady=4)
-        if mode == "music":
+        if mode == "music" and result.kind == "track":
             ctk.CTkButton(
                 btn_col, text="Change", width=80,
                 fg_color="transparent", border_width=1,
@@ -3570,6 +4541,20 @@ class _ResultRow:
             self._alternate_panel = _MusicAlternatePanel(
                 self.outer, result_index, app, current=result,
             )
+
+    def update_result(self, result: SearchResult) -> None:
+        if not self._alive:
+            return
+        old_thumb = self.result.thumbnail_url
+        self.result = result
+        meta = result.metadata_line()
+        if self._meta_label is not None:
+            if meta:
+                self._meta_label.configure(text=meta)
+            else:
+                self._meta_label.configure(text="")
+        if result.thumbnail_url and result.thumbnail_url != old_thumb:
+            self._kick_off_thumb_fetch()
 
     def _kick_off_thumb_fetch(self) -> None:
         url = self.result.thumbnail_url
@@ -3671,6 +4656,67 @@ class _LogPopout(ctk.CTkToplevel):
 
     def _close(self) -> None:
         self.app._log_popout = None
+        self.destroy()
+
+
+class _JobsPopout(ctk.CTkToplevel):
+    """Detached Active/Recent window that mirrors main job lists."""
+
+    def __init__(self, app: "App", *, title: str, kind: str) -> None:
+        super().__init__(app)
+        self.app = app
+        self.kind = kind  # "active" | "recent"
+        self.title(f"easy-dlp — {title}")
+        self.geometry("900x420")
+        self.minsize(500, 260)
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(bar, text=title, font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkButton(bar, text="Close", width=80, command=self._close).pack(side="right")
+
+        self.body = ctk.CTkScrollableFrame(self)
+        self.body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self._refresh()
+        self.after(500, self._poll_refresh)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.after(100, self.lift)
+
+    def _poll_refresh(self) -> None:
+        if not self.winfo_exists():
+            return
+        self._refresh()
+        self.after(750, self._poll_refresh)
+
+    def _refresh(self) -> None:
+        for child in self.body.winfo_children():
+            child.destroy()
+        jobs = self.app.jobs.active() if self.kind == "active" else self.app.jobs.recent(50)
+        for job in jobs:
+            row = ctk.CTkFrame(self.body)
+            row.pack(fill="x", padx=4, pady=3)
+            ctk.CTkLabel(row, text=f"[{job.state}] {job.label}", anchor="w").pack(
+                side="left", fill="x", expand=True, padx=8, pady=6,
+            )
+            ctk.CTkLabel(row, text=job.progress_msg or "", anchor="e").pack(
+                side="right", padx=8, pady=6,
+            )
+
+    def _close(self) -> None:
+        if self.kind == "active":
+            self.app._active_popout = None
+            # Restore the hidden section in the main window
+            try:
+                self.app._active_outer.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            self.app._recent_popout = None
+            try:
+                self.app._recent_outer.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
+            except Exception:  # noqa: BLE001
+                pass
         self.destroy()
 
 
@@ -3848,8 +4894,12 @@ class _RecentRow:
     }
 
     def __init__(self, parent, job: Job, app: "App") -> None:
-        self.job = job
         self.app = app
+        self.jobs: list[Job] = [job]
+        self.kinds: list[str] = [job.kind]
+        self.job = job
+        self.latest_job_id = job.id
+
         border_kw: dict[str, Any] = {}
         if job.state == FAILED:
             border_kw = {"border_width": 2, "border_color": ("#c44", "#f55")}
@@ -3859,47 +4909,103 @@ class _RecentRow:
         inner = ctk.CTkFrame(self.frame, fg_color="transparent")
         inner.pack(fill="x", padx=8, pady=4)
 
-        glyph = self._GLYPH.get(job.state, "·")
-        glyph_color = self._GLYPH_COLOR.get(job.state, ("gray40", "gray70"))
-        ctk.CTkLabel(
-            inner, text=glyph, width=20,
-            text_color=glyph_color, font=ctk.CTkFont(size=16, weight="bold"),
-        ).pack(side="left", padx=(0, 6))
+        self._glyph_label = ctk.CTkLabel(
+            inner, text="·", width=20,
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        self._glyph_label.pack(side="left", padx=(0, 6))
 
         text_col = ctk.CTkFrame(inner, fg_color="transparent")
         text_col.pack(side="left", fill="x", expand=True)
-        label_font = ctk.CTkFont(weight="bold")
-        if job.state == FAILED:
-            label_font = ctk.CTkFont(weight="bold")
-        ctk.CTkLabel(
-            text_col, text=job.label, anchor="w", justify="left",
-            font=label_font, wraplength=700,
-        ).pack(fill="x")
-        if job.state == FAILED and job.error:
-            ctk.CTkLabel(
-                text_col, text=job.error, anchor="w", justify="left",
-                text_color=("#a33", "#f66"), wraplength=700,
-            ).pack(fill="x")
-        elif job.state == CANCELLED:
-            ctk.CTkLabel(
-                text_col, text="cancelled", anchor="w",
-                text_color=("gray40", "gray70"),
-            ).pack(fill="x")
+        self.title_label = ctk.CTkLabel(
+            text_col, text="", anchor="w", justify="left",
+            font=ctk.CTkFont(weight="bold"), wraplength=700,
+        )
+        self.title_label.pack(fill="x")
+        self.meta_label = ctk.CTkLabel(
+            text_col, text="", anchor="w", justify="left",
+            text_color=("gray40", "gray70"), wraplength=700,
+        )
+        self.meta_label.pack(fill="x")
+        self.error_label = ctk.CTkLabel(
+            text_col, text="", anchor="w", justify="left",
+            text_color=("#a33", "#f66"), wraplength=700,
+        )
 
-        btn_col = ctk.CTkFrame(inner, fg_color="transparent")
-        btn_col.pack(side="right", padx=(4, 0))
+        self.btn_col = ctk.CTkFrame(inner, fg_color="transparent")
+        self.btn_col.pack(side="right", padx=(4, 0))
+        self._refresh()
 
-        out_dir = job.params.get("output_dir")
-        if job.state == DONE and out_dir:
+    def merge(self, job: Job) -> None:
+        self.jobs.append(job)
+        if job.kind not in self.kinds:
+            self.kinds.append(job.kind)
+        if job.id > self.latest_job_id:
+            self.latest_job_id = job.id
+            self.job = job
+        self._refresh()
+
+    def has_failed(self) -> bool:
+        return any(j.state == FAILED for j in self.jobs)
+
+    def is_all_cancelled(self) -> bool:
+        return bool(self.jobs) and all(j.state == CANCELLED for j in self.jobs)
+
+    def failed_jobs(self) -> list[Job]:
+        return [j for j in self.jobs if j.state in (FAILED, CANCELLED)]
+
+    def worst_state(self) -> str:
+        if self.has_failed():
+            return FAILED
+        if self.is_all_cancelled():
+            return CANCELLED
+        return DONE
+
+    def _refresh(self) -> None:
+        state = self.worst_state()
+        glyph = self._GLYPH.get(state, "·")
+        glyph_color = self._GLYPH_COLOR.get(state, ("gray40", "gray70"))
+        self._glyph_label.configure(text=glyph, text_color=glyph_color)
+
+        if state == FAILED:
+            self.frame.configure(border_width=2, border_color=("#c44", "#f55"))
+        else:
+            self.frame.configure(border_width=0)
+
+        self.title_label.configure(text=_recent_primary_title(self.job))
+        meta = _recent_metadata_line(self.job, self.kinds)
+        if meta:
+            self.meta_label.configure(text=meta)
+            self.meta_label.pack(fill="x")
+        else:
+            self.meta_label.pack_forget()
+
+        errors = [
+            f"{_RECENT_KIND_LABEL.get(j.kind, j.kind)}: {j.error}"
+            for j in self.jobs
+            if j.state == FAILED and j.error
+        ]
+        if errors:
+            self.error_label.configure(text="\n".join(errors))
+            self.error_label.pack(fill="x")
+        else:
+            self.error_label.pack_forget()
+
+        for child in self.btn_col.winfo_children():
+            child.destroy()
+
+        out_dir = self.job.params.get("output_dir")
+        if state == DONE and out_dir:
             ctk.CTkButton(
-                btn_col, text="📁", width=40,
+                self.btn_col, text="📁", width=40,
                 command=lambda: _reveal_in_file_manager(out_dir),
             ).pack(side="right", padx=2)
 
-        if job.state in (FAILED, CANCELLED):
+        for failed_job in self.failed_jobs():
+            kind_label = _RECENT_KIND_LABEL.get(failed_job.kind, "Retry")
             ctk.CTkButton(
-                btn_col, text="Retry", width=70,
-                command=lambda: app._retry_job(job),
+                self.btn_col, text=f"Retry {kind_label}", width=90,
+                command=lambda j=failed_job: self.app._retry_job(j),
             ).pack(side="right", padx=2)
 
 

@@ -1,0 +1,46 @@
+#!/bin/bash
+# Double-clickable macOS launcher for easy-dlp.
+# Lives inside easy-dlp.app next to the project files.
+#
+# Why Terminal? If the project lives on Desktop/Documents, macOS blocks a
+# double-clicked .app from reading those folders until you grant permission.
+# Terminal usually already has access, so routing through it makes launch reliable.
+
+set -euo pipefail
+
+# easy-dlp.app/Contents/MacOS → project root
+PROJECT_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$PROJECT_ROOT"
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"
+
+chmod +x "$PROJECT_ROOT/run.sh" 2>/dev/null || true
+
+LOG_DIR="${HOME}/Library/Logs"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/easy-dlp.log"
+
+# First launch: keep Terminal open so the user can see venv setup progress.
+if [[ ! -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
+  osascript <<EOF
+tell application "Terminal"
+  activate
+  do script "export PATH=\"/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:\$PATH\"; cd $(printf %q "$PROJECT_ROOT") && ./run.sh; status=\$?; echo; if [ \$status -ne 0 ]; then echo 'Setup failed. Read the messages above.'; else echo 'App is open. You can close this Terminal window.'; fi"
+end tell
+EOF
+  exit 0
+fi
+
+# Later launches: start via Terminal (for Desktop/Documents access), detach the
+# GUI, then close the Terminal window so it only flashes briefly.
+osascript <<EOF
+tell application "Terminal"
+  set launchCmd to "export PATH=\"/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:\$PATH\"; cd $(printf %q "$PROJECT_ROOT") && nohup .venv/bin/python main.py >>$(printf %q "$LOG") 2>&1 & exit"
+  set w to do script launchCmd
+  delay 0.8
+  try
+    close (first window whose index is (get index of w's window))
+  end try
+end tell
+EOF
+exit 0

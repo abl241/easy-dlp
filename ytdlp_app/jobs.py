@@ -216,11 +216,13 @@ class JobQueue:
 
         params = job.params
         cookies = params.get("cookies_path") or None
+        verbose = bool(params.get("verbose", False))
 
         if job.kind == "audio":
             result = dl.download_audio(
                 [params["url"]], params["output_dir"],
                 cookies_path=cookies,
+                verbose=verbose,
                 progress=log,
                 on_pct=on_progress,
                 cancel_event=job.cancel_event,
@@ -233,6 +235,7 @@ class JobQueue:
             result = dl.download_video(
                 [params["url"]], params["output_dir"],
                 cookies_path=cookies,
+                verbose=verbose,
                 progress=log,
                 on_pct=on_progress,
                 cancel_event=job.cancel_event,
@@ -245,6 +248,7 @@ class JobQueue:
             result = dl.download_thumbnails_only(
                 [params["url"]], params["output_dir"],
                 cookies_path=cookies,
+                verbose=verbose,
                 progress=log,
                 on_pct=on_progress,
                 cancel_event=job.cancel_event,
@@ -258,40 +262,62 @@ class JobQueue:
 
             url = params["url"]
             if params.get("prefer_audio"):
-                orig = se.SearchResult(
-                    url=params.get("source_url") or url,
-                    title=params.get("source_title") or "",
-                    uploader=params.get("source_uploader") or "",
-                    duration_s=params.get("source_duration_s"),
-                    view_count=None,
-                    upload_date=None,
-                    thumbnail_url=params.get("source_thumbnail_url"),
+                source_url = str(params.get("source_url") or url)
+                prefer_explicit = bool(params.get("allow_explicit", True))
+                skip_rematch = (
+                    se.is_youtube_music_watch_url(source_url)
+                    or se.is_youtube_music_watch_url(url)
                 )
-                if not params.get("source_title"):
-                    resolved = se.resolve_urls(
-                        [url],
+                # Still rematch when the chosen upload is the wrong content
+                # rating vs the user's explicit/clean preference.
+                if skip_rematch:
+                    from .metadata.parse import detect_content_rating
+
+                    title_hint = str(params.get("source_title") or "")
+                    rating = detect_content_rating(title_hint)
+                    if (
+                        (prefer_explicit and rating == "clean")
+                        or (not prefer_explicit and rating == "explicit")
+                    ):
+                        skip_rematch = False
+                if not skip_rematch:
+                    orig = se.SearchResult(
+                        url=params.get("source_url") or url,
+                        title=params.get("source_title") or "",
+                        uploader=params.get("source_uploader") or "",
+                        duration_s=params.get("source_duration_s"),
+                        view_count=None,
+                        upload_date=None,
+                        thumbnail_url=params.get("source_thumbnail_url"),
+                    )
+                    if not params.get("source_title"):
+                        resolved = se.resolve_urls(
+                            [url],
+                            cookies_path=cookies,
+                            cancel_event=job.cancel_event,
+                            progress=log,
+                        )
+                        if resolved:
+                            orig = resolved[0]
+                    url = se.find_preferred_audio_url(
+                        orig,
                         cookies_path=cookies,
                         cancel_event=job.cancel_event,
                         progress=log,
+                        expected_artist=params.get("expected_artist"),
+                        expected_title=params.get("expected_title"),
+                        expected_duration_s=params.get("expected_duration_s"),
+                        prefer_explicit=prefer_explicit,
                     )
-                    if resolved:
-                        orig = resolved[0]
-                url = se.find_preferred_audio_url(
-                    orig,
-                    cookies_path=cookies,
-                    cancel_event=job.cancel_event,
-                    progress=log,
-                    expected_artist=params.get("expected_artist"),
-                    expected_title=params.get("expected_title"),
-                    expected_duration_s=params.get("expected_duration_s"),
-                )
 
             result = dl.download_music(
                 [url], params["output_dir"],
                 cookies_path=cookies,
+                verbose=verbose,
                 progress=log,
                 on_pct=on_progress,
                 cancel_event=job.cancel_event,
+                prefer_explicit=bool(params.get("allow_explicit", True)),
             )
             if not result.success:
                 job.state = FAILED
@@ -305,6 +331,13 @@ class JobQueue:
                         if i < len(result.track_infos)
                         else None
                     )
+                    # Album downloads pass source_album — skip the downloader's
+                    # per-song iTunes guess so postprocess can match in album context.
+                    prefetch_match = (
+                        None
+                        if params.get("source_album")
+                        else (info.itunes_match if info else None)
+                    )
                     track_info = mp.TrackInfo(
                         title=info.title if info else "",
                         uploader=info.uploader if info else "",
@@ -312,8 +345,9 @@ class JobQueue:
                         parsed_title=info.parsed_title if info else "",
                         duration_s=info.duration_s if info else None,
                         thumbnail_url=info.thumbnail_url if info else None,
-                        itunes_match=info.itunes_match if info else None,
+                        itunes_match=prefetch_match,
                         source_album=params.get("source_album") or "",
+                        source_album_artist=params.get("source_album_artist") or "",
                         source_track_number=params.get("source_track_number"),
                         source_disc_number=params.get("source_disc_number"),
                         source_cover_url=params.get("source_cover_url"),
@@ -323,6 +357,7 @@ class JobQueue:
                         track_info=track_info,
                         enrich_metadata=enrich,
                         download_lyrics=lyrics,
+                        prefer_explicit=bool(params.get("allow_explicit", True)),
                         progress=log,
                         cancel_event=job.cancel_event,
                     )
@@ -370,18 +405,87 @@ class JobQueue:
             # consistent status panel. `search_more` is the same call with a
             # larger limit; the listener slices off the already-shown prefix.
             from . import search as se
-            results = se.search_youtube(
-                params["query"],
-                limit=params.get("limit", 20),
-                cookies_path=cookies,
-                cancel_event=job.cancel_event,
-                progress=log,
-                videos_only=bool(params.get("videos_only", True)),
-                audio_only=bool(params.get("audio_only", False)),
-                use_youtube_music=bool(params.get("use_youtube_music", False)),
-                enrich_from=int(params.get("already_loaded", 0)),
-            )
-            job.result = results
+            if (
+                job.kind == "search_more"
+                and params.get("results_context") == "music"
+            ):
+                already = int(params.get("already_loaded", 0))
+                limit = int(params.get("limit", 20))
+                track_count_requested = max(0, limit - already)
+                tracks, albums, albums_exhausted = se.search_youtube_more_music(
+                    params["query"],
+                    track_offset=already,
+                    track_count=track_count_requested,
+                    album_offset=int(params.get("album_offset", 0)),
+                    album_fetch_count=int(params.get("album_fetch_count", 0)),
+                    cookies_path=cookies,
+                    cancel_event=job.cancel_event,
+                    progress=log,
+                    verbose=verbose,
+                    videos_only=bool(params.get("videos_only", True)),
+                    audio_only=bool(params.get("audio_only", False)),
+                    use_youtube_music=bool(params.get("use_youtube_music", False)),
+                )
+                tracks_exhausted = (
+                    track_count_requested > 0 and len(tracks) < track_count_requested
+                )
+                job.result = {
+                    "tracks": tracks,
+                    "albums": albums,
+                    "albums_exhausted": albums_exhausted,
+                    "tracks_exhausted": tracks_exhausted,
+                }
+            else:
+                if job.kind == "search_more":
+                    already = int(params.get("already_loaded", 0))
+                    limit = int(params.get("limit", 20))
+                    count = max(0, limit - already)
+                    new_items, _, tracks_exhausted = se._search_youtube_more_regular(
+                        params["query"],
+                        track_offset=already,
+                        track_count=count,
+                        cookies_path=cookies,
+                        cancel_event=job.cancel_event,
+                        progress=log,
+                        verbose=verbose,
+                        videos_only=bool(params.get("videos_only", True)),
+                        audio_only=bool(params.get("audio_only", False)),
+                    )
+                    job.result = {
+                        "tracks": new_items,
+                        "tracks_exhausted": tracks_exhausted,
+                    }
+                else:
+                    stream_music = (
+                        params.get("results_context") == "music"
+                        and bool(params.get("use_youtube_music"))
+                    )
+
+                    def on_partial(phase: str, items: list) -> None:
+                        if job.cancel_event.is_set():
+                            raise _Cancelled()
+                        job.result = {
+                            "partial": True,
+                            "phase": phase,
+                            "items": items,
+                        }
+                        self._notify(job)
+
+                    job.result = se.search_youtube(
+                        params["query"],
+                        limit=params.get("limit", 20),
+                        cookies_path=cookies,
+                        cancel_event=job.cancel_event,
+                        progress=log,
+                        videos_only=bool(params.get("videos_only", True)),
+                        audio_only=bool(params.get("audio_only", False)),
+                        use_youtube_music=bool(params.get("use_youtube_music", False)),
+                        include_albums=bool(params.get("include_albums", False)),
+                        include_playlists=bool(params.get("include_playlists", False)),
+                        album_limit=int(params.get("album_limit") or 5),
+                        verbose=verbose,
+                        on_partial=on_partial if stream_music else None,
+                    )
 
         elif job.kind == "resolve":
             from . import search as se
@@ -390,6 +494,7 @@ class JobQueue:
                 cookies_path=cookies,
                 cancel_event=job.cancel_event,
                 progress=log,
+                verbose=verbose,
             )
             job.result = results
 
@@ -421,6 +526,10 @@ class JobQueue:
             cfg = get_match_config(match_quality)
             total = len(tracks)
             matched: list[MusicTrack] = []
+            stream_match = params.get("results_context") == "music"
+            if stream_match:
+                job.result = list(tracks)
+                self._notify(job)
             match_started = time.monotonic()
             for i, track in enumerate(tracks):
                 if job.cancel_event.is_set():
@@ -440,8 +549,12 @@ class JobQueue:
                     use_youtube_music=bool(params.get("use_youtube_music", False)),
                     audio_only=bool(params.get("audio_only", True)),
                     match_quality=match_quality,
+                    prefer_explicit=bool(params.get("allow_explicit", True)),
                 )
                 matched.append(track.with_match(result))
+                if stream_match:
+                    job.result = matched + tracks[i + 1:]
+                    self._notify(job)
                 pending_left = total - (i + 1)
                 if pending_left > 0 and cfg.inter_track_delay_s > 0:
                     time.sleep(cfg.inter_track_delay_s)

@@ -24,6 +24,7 @@ class MusicTrack:
     title: str
     duration_s: int | None = None
     album: str = ""
+    album_artist: str = ""
     cover_url: str | None = None
     track_number: int | None = None
     disc_number: int | None = None

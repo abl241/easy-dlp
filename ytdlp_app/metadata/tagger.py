@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mutagen.id3 import APIC, ID3, TALB, TCON, TDRC, TIT2, TPE1, TPOS, TRCK, USLT, ID3NoHeaderError
+from mutagen.id3 import APIC, ID3, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK, USLT, ID3NoHeaderError
 from mutagen.mp3 import MP3
 
 from .itunes import ITunesTrack
-from .parse import ParsedTrack
+from .parse import ParsedTrack, primary_album_artist
 
 
 def _mime_for_image(data: bytes) -> str:
@@ -59,10 +59,13 @@ def apply_itunes_tags(
         audio.add_tags()
 
     tags = audio.tags
-    _clear_frames(tags, "TIT2", "TPE1", "TALB", "TDRC", "TCON", "TRCK", "TPOS", "USLT")
+    _clear_frames(tags, "TIT2", "TPE1", "TPE2", "TALB", "TDRC", "TCON", "TRCK", "TPOS", "USLT")
 
     tags["TIT2"] = TIT2(encoding=3, text=track.title)
     tags["TPE1"] = TPE1(encoding=3, text=track.artist)
+    album_artist = primary_album_artist(track.artist, album_artist=track.album_artist)
+    if album_artist:
+        tags["TPE2"] = TPE2(encoding=3, text=album_artist)
     if track.album:
         tags["TALB"] = TALB(encoding=3, text=track.album)
     if track.year:
@@ -103,6 +106,9 @@ def apply_youtube_fallback_tags(
     tags["TIT2"] = TIT2(encoding=3, text=parsed.title)
     if parsed.artist:
         tags["TPE1"] = TPE1(encoding=3, text=parsed.artist)
+        album_artist = primary_album_artist(parsed.artist)
+        if album_artist:
+            tags["TPE2"] = TPE2(encoding=3, text=album_artist)
     if artwork:
         _set_cover_art(tags, artwork)
     if lyrics_plain:

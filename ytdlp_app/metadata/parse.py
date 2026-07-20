@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
+
+ContentRating = Literal["explicit", "clean", "unknown"]
 
 # Trailing parenthetical/bracket tags common on music uploads.
 _JUNK_SUFFIX_RE = re.compile(
@@ -14,6 +17,24 @@ _JUNK_SUFFIX_RE = re.compile(
     r"|hd|4k|mv|explicit|clean|remaster(?:ed)?"
     r")"
     r"[\)\]\}].*$",
+    re.IGNORECASE,
+)
+
+# Detect advisory labels before junk stripping removes them.
+_EXPLICIT_RATING_RE = re.compile(
+    r"[\(\[\{]\s*explicit\s*[\)\]\}]"
+    r"|\bexplicit\s*(?:version|edit|lyrics?)?\b"
+    r"|\buncensored\b"
+    r"|\bdirty\s+version\b",
+    re.IGNORECASE,
+)
+_CLEAN_RATING_RE = re.compile(
+    r"[\(\[\{]\s*clean(?:\s*version)?\s*[\)\]\}]"
+    r"|\bclean\s+version\b"
+    r"|\bcensored\b"
+    r"|\bradio\s+edit\b"
+    r"|\bnon[\s-]?explicit\b"
+    r"|\bedited\s+version\b",
     re.IGNORECASE,
 )
 
@@ -30,6 +51,20 @@ _TITLE_SEPARATORS = (" - ", " – ", " — ", " | ", " / ")
 class ParsedTrack:
     artist: str
     title: str
+
+
+def detect_content_rating(text: str) -> ContentRating:
+    """Return explicit/clean/unknown from title or catalog metadata text."""
+    raw = (text or "").strip()
+    if not raw:
+        return "unknown"
+    # Check clean first so "Clean (Explicit)" quirks rarely matter; real
+    # titles almost never combine both, and "clean" markers are rarer.
+    if _CLEAN_RATING_RE.search(raw):
+        return "clean"
+    if _EXPLICIT_RATING_RE.search(raw):
+        return "explicit"
+    return "unknown"
 
 
 def parse_youtube_track(raw_title: str, uploader: str = "") -> ParsedTrack:
@@ -76,3 +111,25 @@ def sanitize_filename(name: str, *, max_len: int = 180) -> str:
     if len(cleaned) > max_len:
         cleaned = cleaned[:max_len].rstrip(" .")
     return cleaned or "track"
+
+
+_FEAT_ARTIST_RE = re.compile(
+    r"\s+(?:feat\.?|ft\.?|featuring)\s+",
+    re.IGNORECASE,
+)
+
+
+def primary_album_artist(artist: str, *, album_artist: str = "") -> str:
+    """Resolve the Album Artist (TPE2) value for library grouping."""
+    album_artist = (album_artist or "").strip()
+    if album_artist:
+        return album_artist
+    artist = (artist or "").strip()
+    if not artist:
+        return ""
+    if "&" in artist:
+        return artist.split("&", 1)[0].strip()
+    feat = _FEAT_ARTIST_RE.search(artist)
+    if feat:
+        return artist[: feat.start()].strip()
+    return artist

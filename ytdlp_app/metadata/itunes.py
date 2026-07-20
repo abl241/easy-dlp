@@ -31,6 +31,9 @@ class ITunesTrack:
     disc_number: int | None
     duration_ms: int | None
     artwork_url: str | None
+    album_artist: str = ""
+    # iTunes trackExplicitness: "explicit" | "cleaned" | "notExplicit" | ""
+    explicitness: str = ""
 
 
 def search_track(
@@ -40,6 +43,7 @@ def search_track(
     duration_s: int | None = None,
     album: str = "",
     limit: int = 25,
+    prefer_explicit: bool = True,
 ) -> ITunesTrack | None:
     """Return the best iTunes catalog match for a track, or None."""
     artist = (artist or "").strip()
@@ -55,11 +59,15 @@ def search_track(
         if artist_id is not None:
             match = _search_artist_catalog(
                 artist_id, title, duration_s, album=album,
+                prefer_explicit=prefer_explicit,
             )
             if match is not None:
                 return match
 
-    return _search_songs(artist, title, duration_s=duration_s, album=album, limit=limit)
+    return _search_songs(
+        artist, title, duration_s=duration_s, album=album, limit=limit,
+        prefer_explicit=prefer_explicit,
+    )
 
 
 def fetch_artwork(url: str | None, *, size: int = 600) -> bytes | None:
@@ -116,6 +124,7 @@ def _search_artist_catalog(
     duration_s: int | None,
     *,
     album: str = "",
+    prefer_explicit: bool = True,
 ) -> ITunesTrack | None:
     """Find a song within a known artist's iTunes catalog."""
     params = urllib.parse.urlencode({
@@ -135,7 +144,10 @@ def _search_artist_catalog(
         candidate = _row_to_track(row)
         if candidate is None:
             continue
-        score = _score_title_match(candidate, title, duration_s, album=album)
+        score = _score_title_match(
+            candidate, title, duration_s, album=album,
+            prefer_explicit=prefer_explicit,
+        )
         if score > best_score:
             best_score = score
             best = candidate
@@ -152,6 +164,7 @@ def _search_songs(
     duration_s: int | None,
     album: str = "",
     limit: int,
+    prefer_explicit: bool = True,
 ) -> ITunesTrack | None:
     """Fallback: broad song search with strict artist matching."""
     term = " ".join(x for x in (artist, title) if x)
@@ -172,7 +185,10 @@ def _search_songs(
         candidate = _row_to_track(row)
         if candidate is None:
             continue
-        score = _score_match(candidate, artist, title, duration_s, album=album)
+        score = _score_match(
+            candidate, artist, title, duration_s, album=album,
+            prefer_explicit=prefer_explicit,
+        )
         if score > best_score:
             best_score = score
             best = candidate
@@ -231,6 +247,12 @@ def _row_to_track(row: dict) -> ITunesTrack | None:
     if not isinstance(title, str) or not isinstance(artist, str):
         return None
     album = row.get("collectionName")
+    album_artist_raw = row.get("collectionArtistName")
+    album_artist = (
+        str(album_artist_raw).strip()
+        if isinstance(album_artist_raw, str) and str(album_artist_raw).strip()
+        else ""
+    )
     release = row.get("releaseDate")
     year = None
     if isinstance(release, str) and len(release) >= 4:
@@ -246,16 +268,24 @@ def _row_to_track(row: dict) -> ITunesTrack | None:
     disc_number = int(disc_number) if isinstance(disc_number, (int, float)) else None
     genre = row.get("primaryGenreName")
     artwork = row.get("artworkUrl100") or row.get("artworkUrl60")
+    explicitness_raw = row.get("trackExplicitness")
+    explicitness = (
+        str(explicitness_raw).strip()
+        if isinstance(explicitness_raw, str) and str(explicitness_raw).strip()
+        else ""
+    )
     return ITunesTrack(
         artist=artist,
         title=title,
         album=str(album) if isinstance(album, str) else "",
+        album_artist=album_artist,
         year=year,
         genre=str(genre) if isinstance(genre, str) else None,
         track_number=track_number,
         disc_number=disc_number,
         duration_ms=duration_ms,
         artwork_url=str(artwork) if isinstance(artwork, str) else None,
+        explicitness=explicitness,
     )
 
 
@@ -263,6 +293,13 @@ def _normalize(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^\w\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def albums_match(a: str, b: str, *, min_overlap: float = 0.5) -> bool:
+    """Return whether two album titles likely refer to the same release."""
+    if not a or not b:
+        return True
+    return _token_overlap(a, b) >= min_overlap
 
 
 def _token_overlap(a: str, b: str) -> float:
@@ -312,6 +349,23 @@ def _version_penalty(title: str) -> float:
     return 0.0
 
 
+def _explicitness_adjustment(explicitness: str, *, prefer_explicit: bool) -> float:
+    """Bias iTunes picks toward explicit or clean catalog entries."""
+    kind = (explicitness or "").strip().lower()
+    if prefer_explicit:
+        if kind == "explicit":
+            return 0.12
+        if kind == "cleaned":
+            return -0.18
+        return 0.0
+    if kind == "cleaned":
+        return 0.12
+    if kind == "explicit":
+        return -0.18
+    # notExplicit / unknown — slight nudge when avoiding explicit
+    return 0.04
+
+
 def _album_bonus(album: str, candidate_album: str) -> float:
     album = (album or "").strip()
     if not album or not candidate_album:
@@ -330,6 +384,7 @@ def _score_title_match(
     duration_s: int | None,
     *,
     album: str = "",
+    prefer_explicit: bool = True,
 ) -> float:
     """Score a candidate when the artist is already confirmed."""
     title_score = _token_overlap(candidate.title, title)
@@ -338,6 +393,9 @@ def _score_title_match(
     score = title_score * 0.70 + _duration_bonus(duration_s, candidate.duration_ms)
     score += _album_bonus(album, candidate.album)
     score -= _version_penalty(candidate.title)
+    score += _explicitness_adjustment(
+        candidate.explicitness, prefer_explicit=prefer_explicit,
+    )
     return max(0.0, min(1.0, score))
 
 
@@ -348,6 +406,7 @@ def _score_match(
     duration_s: int | None,
     *,
     album: str = "",
+    prefer_explicit: bool = True,
 ) -> float:
     title_score = _token_overlap(candidate.title, title)
     artist_score = _artist_similarity(candidate.artist, artist) if artist else 0.0
@@ -364,4 +423,7 @@ def _score_match(
     score += _duration_bonus(duration_s, candidate.duration_ms)
     score += _album_bonus(album, candidate.album)
     score -= _version_penalty(candidate.title)
+    score += _explicitness_adjustment(
+        candidate.explicitness, prefer_explicit=prefer_explicit,
+    )
     return max(0.0, min(1.0, score))

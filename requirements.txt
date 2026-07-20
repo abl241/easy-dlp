@@ -5,3 +5,4 @@ customtkinter>=5.2.2
 Pillow>=10.0.0
 mutagen>=1.47.0
 spotifyscraper>=3.0
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
