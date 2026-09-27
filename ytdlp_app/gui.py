@@ -2466,11 +2466,20 @@ class App(ctk.CTk):
         cookies = self.settings.get("cookies_path") or None
         verbose = bool(self.settings.get("verbose"))
         collection_url = result.url.strip()
+        kind_label = "Album" if result.kind == "album" else "Playlist"
+        title = result.display_title(50)
         if collection_url in self._pending_collection_urls:
-            self._set_status("Already expanding this collection…")
+            self._set_status(f"Still expanding {kind_label.lower()}: {title}…")
+            self._ensure_active_expanded()
+            self._music_set_collection_row_busy(collection_url, True)
             return
         self._pending_collection_urls.add(collection_url)
-        kind_label = "Album" if result.kind == "album" else "Playlist"
+        self._music_set_collection_row_busy(collection_url, True)
+        self._set_status(f"Expanding {kind_label.lower()}: {title}…")
+        self.music_results_header_label.configure(
+            text=f"Results — expanding {kind_label.lower()}: {_truncate(title, 50)}",
+        )
+        self._ensure_active_expanded()
         label = f"{kind_label}: expand {result.display_title(60)}"
         self.jobs.enqueue(
             kind="resolve",
@@ -2486,6 +2495,15 @@ class App(ctk.CTk):
             collection_kind=result.kind,
             collection_url=collection_url,
         )
+
+    def _music_set_collection_row_busy(self, collection_url: str, busy: bool) -> None:
+        """Disable/relabel album/playlist Download buttons while expanding."""
+        for row in self._music_result_rows:
+            if getattr(row, "result", None) is None:
+                continue
+            if (row.result.url or "").strip() != collection_url:
+                continue
+            row.set_collection_busy(busy)
 
     def _download_all(self, *, override: bool) -> None:
         if not self.results:
@@ -3198,7 +3216,13 @@ class App(ctk.CTk):
         loaded_count: int,
         page_size: int,
     ) -> bool:
-        """True when the user has scrolled near the end, or all items are visible."""
+        """True when the list overflows and the user has scrolled near the end.
+
+        Do not treat "all items fit in the viewport" as near-bottom — that used
+        to auto-fetch another page right after a Limit:10 search (10 → 20)
+        because short results never need scrolling. Use the Load more button
+        or scroll when content is taller than the pane.
+        """
         if loaded_count < page_size:
             return False
         try:
@@ -3213,8 +3237,10 @@ class App(ctk.CTk):
             if not bbox:
                 return False
             content_h = bbox[3] - bbox[1]
+            # Content fits without scrolling — honor the search Limit as-is.
+            # (yview is often (0, 1) here, which would false-trigger below.)
             if content_h <= view_h + 8:
-                return True
+                return False
             if bottom >= 0.88:
                 return True
             # yview fractions can stall slightly below 1.0 on macOS/CTk.
@@ -3613,16 +3639,28 @@ class App(ctk.CTk):
                     text=f"Results — searching: {_truncate(job.progress_msg or '...', 60)}"
                 )
             elif job.kind in ("resolve", "source_resolve", "source_match_all"):
+                ctx = job.params.get("results_context", "download")
+                music_ctx = (
+                    ctx == "music"
+                    or ctx in ("music_album_expand", "music_playlist_expand")
+                )
                 hdr = (
                     self.music_results_header_label
-                    if ctx == "music"
+                    if music_ctx
                     else self.results_header_label
                 )
-                verb = {
-                    "resolve": "resolving",
-                    "source_resolve": "resolving",
-                    "source_match_all": "matching",
-                }.get(job.kind, "working")
+                if ctx in ("music_album_expand", "music_playlist_expand"):
+                    kind = "album" if "album" in ctx else "playlist"
+                    verb = f"expanding {kind}"
+                    self._set_status(
+                        f"Expanding {kind}: {_truncate(job.progress_msg or '...', 80)}",
+                    )
+                else:
+                    verb = {
+                        "resolve": "resolving",
+                        "source_resolve": "resolving",
+                        "source_match_all": "matching",
+                    }.get(job.kind, "working")
                 hdr.configure(
                     text=f"Results — {verb}: {_truncate(job.progress_msg or '...', 60)}"
                 )
@@ -3655,18 +3693,18 @@ class App(ctk.CTk):
                     elif job.state == CANCELLED and panel is not None:
                         panel.set_searching("Cancelled")
                 elif job.state == DONE and isinstance(job.result, list) and ctx in ("music_album_expand", "music_playlist_expand"):
+                    collection_url = str(job.params.get("collection_url") or "").strip()
+                    if collection_url:
+                        self._pending_collection_urls.discard(collection_url)
+                        self._music_set_collection_row_busy(collection_url, False)
                     if job.id in self._terminal_side_effects_handled:
                         pass
                     else:
                         self._terminal_side_effects_handled.add(job.id)
                         from dataclasses import replace
 
-                        from .metadata.parse import parse_youtube_track
+                        from .metadata.parse import parse_youtube_track, primary_album_artist
                         from .sources.base import MusicTrack
-
-                        collection_url = str(job.params.get("collection_url") or "").strip()
-                        if collection_url:
-                            self._pending_collection_urls.discard(collection_url)
 
                         out_dir = str(job.params.get("out_dir") or self.settings.get("music_dir") or "")
                         if not out_dir:
@@ -3688,22 +3726,28 @@ class App(ctk.CTk):
                                     continue
                                 mt = MusicTrack.from_search_result(r)
                                 parsed = parse_youtube_track(r.title, r.uploader)
-                                artist = (
-                                    collection_artist
-                                    or parsed.artist
+                                # Keep full track credits on Artist; Album Artist
+                                # is primary-only for Apple Music grouping.
+                                track_artist = (
+                                    parsed.artist
                                     or mt.artist
+                                    or collection_artist
                                 )
                                 title = parsed.title or mt.title or r.title
-                                if artist or title:
+                                album_artist = primary_album_artist(
+                                    track_artist,
+                                    album_artist=collection_artist,
+                                )
+                                if track_artist or title:
                                     mt = replace(
                                         mt,
-                                        artist=artist,
+                                        artist=track_artist,
                                         title=title,
                                     )
                                 mt = replace(
                                     mt,
                                     album=normalize_collection_title(collection_title),
-                                    album_artist=collection_artist,
+                                    album_artist=album_artist,
                                     track_number=track_num,
                                     cover_url=collection_cover_url or mt.cover_url,
                                 )
@@ -3730,12 +3774,26 @@ class App(ctk.CTk):
                                         f"from {title or 'collection'}.",
                                     )
 
+                                self._set_status(
+                                    f"Found {len(items)} track(s) — queuing downloads…",
+                                )
                                 self.after(0, _start_batch)
 
                 elif job.state in (FAILED, CANCELLED) and ctx in ("music_album_expand", "music_playlist_expand"):
                     collection_url = str(job.params.get("collection_url") or "").strip()
                     if collection_url:
                         self._pending_collection_urls.discard(collection_url)
+                        self._music_set_collection_row_busy(collection_url, False)
+                    kind = "album" if "album" in ctx else "playlist"
+                    if job.state == FAILED:
+                        self._set_status(
+                            f"Failed to expand {kind}: {job.error or 'unknown error'}",
+                        )
+                        self.music_results_header_label.configure(
+                            text=f"Results — {kind} expand failed",
+                        )
+                    else:
+                        self._set_status(f"{kind.capitalize()} expand cancelled.")
 
                 elif job.state == DONE and isinstance(job.result, list):
                     if ctx == "music":
@@ -4631,6 +4689,7 @@ class _MusicAlternateResultRow:
         if meta:
             ctk.CTkLabel(
                 text_col, text=meta, anchor="w", text_color=("gray40", "gray70"),
+                wraplength=360, justify="left",
             ).pack(fill="x")
 
         ctk.CTkButton(
@@ -4896,22 +4955,6 @@ class _MusicTrackRow:
         )
         self.thumb_label.pack(side="left", padx=(6, 8), pady=6)
 
-        text_col = ctk.CTkFrame(self.frame, fg_color="transparent")
-        text_col.pack(side="left", fill="x", expand=True, padx=2, pady=6)
-        ctk.CTkLabel(
-            text_col, text=track.display_title(),
-            anchor="w", font=ctk.CTkFont(weight="bold"),
-            wraplength=500, justify="left",
-        ).pack(fill="x")
-        meta = track.metadata_line()
-        if meta:
-            color = ("gray40", "gray70")
-            if track.match_status == MATCH_FAILED:
-                color = ("#a33", "#f66")
-            ctk.CTkLabel(
-                text_col, text=meta, anchor="w", text_color=color,
-            ).pack(fill="x")
-
         btn_col = ctk.CTkFrame(self.frame, fg_color="transparent")
         btn_col.pack(side="right", padx=6, pady=4)
 
@@ -4948,6 +4991,23 @@ class _MusicTrackRow:
                 fg_color="transparent", border_width=1,
                 command=lambda: app._music_retry_track(track_index),
             ).pack(side="right", padx=2)
+
+        text_col = ctk.CTkFrame(self.frame, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True, padx=2, pady=6)
+        ctk.CTkLabel(
+            text_col, text=track.display_title(),
+            anchor="w", font=ctk.CTkFont(weight="bold"),
+            wraplength=420, justify="left",
+        ).pack(fill="x")
+        meta = track.metadata_line()
+        if meta:
+            color = ("gray40", "gray70")
+            if track.match_status == MATCH_FAILED:
+                color = ("#a33", "#f66")
+            ctk.CTkLabel(
+                text_col, text=meta, anchor="w", text_color=color,
+                wraplength=420, justify="left",
+            ).pack(fill="x")
 
         app._bind_results_mousewheel(self.frame)
         if thumb_url:
@@ -5056,6 +5116,35 @@ class _ResultRow:
         )
         self.thumb_label.pack(side="left", padx=(6, 8), pady=6)
 
+        # Pack buttons first so long titles/artists can't steal their space.
+        btn_col = ctk.CTkFrame(self.frame, fg_color="transparent")
+        btn_col.pack(side="right", padx=6, pady=4)
+        self._download_btn: ctk.CTkButton | None = None
+        self._folder_btn: ctk.CTkButton | None = None
+        self._collection_busy = False
+        self._download_btn_label = btn_text
+        if mode == "music" and result.kind == "track":
+            ctk.CTkButton(
+                btn_col, text="Change", width=80,
+                fg_color="transparent", border_width=1,
+                command=lambda: app._music_toggle_alternate(result_index),
+            ).pack(side="right", padx=2)
+        self._folder_btn = ctk.CTkButton(
+            btn_col, text="📁", width=44, command=folder_fn,
+        )
+        self._folder_btn.pack(side="right", padx=2)
+        dl_width = 140 if mode == "music" and result.kind in ("album", "playlist") else 110
+        self._download_btn = ctk.CTkButton(
+            btn_col, text=btn_text, width=dl_width, command=download_fn,
+        )
+        self._download_btn.pack(side="right", padx=2)
+        if (
+            mode == "music"
+            and result.kind in ("album", "playlist")
+            and (result.url or "").strip() in app._pending_collection_urls
+        ):
+            self.set_collection_busy(True)
+
         # Title + metadata (center).
         text_col = ctk.CTkFrame(self.frame, fg_color="transparent")
         text_col.pack(side="left", fill="x", expand=True, padx=2, pady=6)
@@ -5089,7 +5178,7 @@ class _ResultRow:
             text=result.display_title(),
             anchor="w",
             font=ctk.CTkFont(weight="bold"),
-            wraplength=500,
+            wraplength=420,
             justify="left",
         ).pack(side="left", fill="x", expand=True)
         meta = result.metadata_line()
@@ -5098,22 +5187,9 @@ class _ResultRow:
             self._meta_label = ctk.CTkLabel(
                 text_col, text=meta, anchor="w",
                 text_color=("gray40", "gray70"),
+                wraplength=420, justify="left",
             )
             self._meta_label.pack(fill="x")
-
-        # Action buttons (right).
-        btn_col = ctk.CTkFrame(self.frame, fg_color="transparent")
-        btn_col.pack(side="right", padx=6, pady=4)
-        if mode == "music" and result.kind == "track":
-            ctk.CTkButton(
-                btn_col, text="Change", width=80,
-                fg_color="transparent", border_width=1,
-                command=lambda: app._music_toggle_alternate(result_index),
-            ).pack(side="right", padx=2)
-        ctk.CTkButton(btn_col, text="📁", width=44,
-                      command=folder_fn).pack(side="right", padx=2)
-        ctk.CTkButton(btn_col, text=btn_text, width=110,
-                      command=download_fn).pack(side="right", padx=2)
 
         # Forward mouse-wheel events from every child widget up to the
         # scrollable frame's canvas — otherwise the wheel does nothing once
@@ -5123,6 +5199,33 @@ class _ResultRow:
         # Kick off the thumbnail fetch. The cache callback may fire on a
         # worker thread, so we hop back to the Tk main loop via `after`.
         self._kick_off_thumb_fetch()
+
+    def set_collection_busy(self, busy: bool) -> None:
+        """Show Expanding… and disable buttons while an album/playlist resolves."""
+        if not self._alive:
+            return
+        if self.result.kind not in ("album", "playlist"):
+            return
+        self._collection_busy = busy
+        if self._download_btn is not None:
+            try:
+                if busy:
+                    self._download_btn.configure(
+                        text="Expanding…", state="disabled",
+                    )
+                else:
+                    self._download_btn.configure(
+                        text=self._download_btn_label, state="normal",
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        if self._folder_btn is not None:
+            try:
+                self._folder_btn.configure(
+                    state="disabled" if busy else "normal",
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     def update_result(self, result: SearchResult) -> None:
         if not self._alive:

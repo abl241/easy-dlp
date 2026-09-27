@@ -66,8 +66,11 @@ class SpotifySource:
         if kind == "album":
             progress("Fetching Spotify album...")
             album = client.get_album(url)
+            album_artists = getattr(album, "artists", None)
             return [
-                _album_track_to_music_track(t, album.name, index=i)
+                _album_track_to_music_track(
+                    t, album.name, album_artists=album_artists, index=i,
+                )
                 for i, t in enumerate(album.tracks, start=1)
             ]
         if kind == "track":
@@ -84,9 +87,22 @@ def _spotify_kind(url: str) -> str:
     return m.group(1).lower()
 
 
+def _artist_list(artists) -> list[str]:
+    names: list[str] = []
+    for a in artists or []:
+        name = getattr(a, "name", None)
+        if name and str(name).strip():
+            names.append(str(name).strip())
+    return names
+
+
 def _artist_names(artists) -> str:
-    names = [a.name for a in artists if getattr(a, "name", None)]
-    return ", ".join(names)
+    return ", ".join(_artist_list(artists))
+
+
+def _first_artist_name(artists) -> str:
+    names = _artist_list(artists)
+    return names[0] if names else ""
 
 
 def _cover_url(images) -> str | None:
@@ -100,6 +116,7 @@ def _track_to_music_track(
     track,
     *,
     album_name: str = "",
+    album_artists=None,
     fallback_track_number: int | None = None,
 ) -> MusicTrack:
     album = album_name or (track.album.name if getattr(track, "album", None) else "")
@@ -114,11 +131,23 @@ def _track_to_music_track(
     disc_number = getattr(track, "disc_number", None)
     if not isinstance(disc_number, int):
         disc_number = None
+
+    track_artists = _artist_list(track.artists)
+    # Album Artist must be primary-only so Apple Music doesn't split categories.
+    if album_artists is not None:
+        album_artist = _first_artist_name(album_artists)
+    else:
+        album_obj = getattr(track, "album", None)
+        album_artist = _first_artist_name(getattr(album_obj, "artists", None))
+    if not album_artist and track_artists:
+        album_artist = track_artists[0]
+
     return MusicTrack(
-        artist=_artist_names(track.artists),
+        artist=", ".join(track_artists),
         title=track.name,
         duration_s=duration_s,
         album=album,
+        album_artist=album_artist,
         cover_url=_cover_url(getattr(track, "images", None)),
         thumbnail_url=_cover_url(getattr(track, "images", None)),
         track_number=track_number,
@@ -132,12 +161,22 @@ def _track_to_music_track(
 def _playlist_track_to_music_track(entry) -> MusicTrack:
     track = entry.track
     album_name = track.album.name if getattr(track, "album", None) else ""
-    return _track_to_music_track(track, album_name=album_name)
+    album_artists = getattr(getattr(track, "album", None), "artists", None)
+    return _track_to_music_track(
+        track, album_name=album_name, album_artists=album_artists,
+    )
 
 
 def _album_track_to_music_track(
-    track, album_name: str, *, index: int | None = None,
+    track,
+    album_name: str,
+    *,
+    album_artists=None,
+    index: int | None = None,
 ) -> MusicTrack:
     return _track_to_music_track(
-        track, album_name=album_name, fallback_track_number=index,
+        track,
+        album_name=album_name,
+        album_artists=album_artists,
+        fallback_track_number=index,
     )

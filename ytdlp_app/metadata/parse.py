@@ -118,18 +118,49 @@ _FEAT_ARTIST_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Collab markers that almost never appear inside a single artist/band name.
+_COLLAB_ARTIST_RE = re.compile(
+    r"\s+(?:x|×|vs\.?|with)\s+",
+    re.IGNORECASE,
+)
+
 
 def primary_album_artist(artist: str, *, album_artist: str = "") -> str:
-    """Resolve the Album Artist (TPE2) value for library grouping."""
-    album_artist = (album_artist or "").strip()
-    if album_artist:
-        return album_artist
-    artist = (artist or "").strip()
-    if not artist:
+    """Resolve Album Artist (TPE2) to a single primary name.
+
+    Apple Music groups library entries by Album Artist. Multi-artist credits
+    belong in Artist (TPE1); Album Artist must stay primary-only or Music
+    creates separate artist categories.
+    """
+    candidate = (album_artist or artist or "").strip()
+    if not candidate:
         return ""
-    if "&" in artist:
-        return artist.split("&", 1)[0].strip()
-    feat = _FEAT_ARTIST_RE.search(artist)
+    return _primary_artist_name(candidate)
+
+
+def _primary_artist_name(name: str) -> str:
+    """Best-effort first/primary artist from a joined credit string."""
+    name = (name or "").strip()
+    if not name:
+        return ""
+
+    feat = _FEAT_ARTIST_RE.search(name)
     if feat:
-        return artist[: feat.start()].strip()
-    return artist
+        name = name[: feat.start()].strip()
+
+    collab = _COLLAB_ARTIST_RE.search(name)
+    if collab:
+        name = name[: collab.start()].strip()
+
+    # Spotify-style joins: "A, B, C". Preserve band names like
+    # "Earth, Wind & Fire" (comma + & with no further ", " list).
+    if ", " in name:
+        first, rest = name.split(", ", 1)
+        if " & " in name and ", " not in rest:
+            return name
+        return first.strip() or name
+
+    if " & " in name:
+        return name.split(" & ", 1)[0].strip() or name
+
+    return name

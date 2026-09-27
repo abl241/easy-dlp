@@ -10,7 +10,7 @@ from typing import Callable
 
 from .metadata.itunes import ITunesTrack, albums_match, fetch_artwork, search_track
 from .metadata.lyrics import fetch_lyrics
-from .metadata.parse import ParsedTrack, parse_youtube_track
+from .metadata.parse import ParsedTrack, parse_youtube_track, primary_album_artist
 from .metadata.tagger import apply_itunes_tags, apply_youtube_fallback_tags
 
 ProgressFn = Callable[[str], None]
@@ -163,7 +163,10 @@ def process_track(
                     artist=tag_artist or parsed.artist,
                     title=tag_title or parsed.title,
                     album=info.source_album,
-                    album_artist=info.source_album_artist,
+                    album_artist=primary_album_artist(
+                        tag_artist or parsed.artist,
+                        album_artist=info.source_album_artist,
+                    ),
                     year=None,
                     genre=None,
                     track_number=info.source_track_number,
@@ -199,9 +202,17 @@ def process_track(
 
 
 def _merge_source_metadata(match: ITunesTrack, info: TrackInfo) -> ITunesTrack:
-    """Prefer playlist/album source fields over per-song iTunes guesses."""
+    """Prefer playlist/album source fields over per-song iTunes guesses.
+
+    Artist (TPE1) keeps full multi-artist credits. Album Artist (TPE2) is
+    forced to a single primary name so Apple Music does not split categories.
+    """
     album = info.source_album or match.album
-    album_artist = info.source_album_artist or match.album_artist
+    raw_album_artist = info.source_album_artist or match.album_artist or ""
+    album_artist = primary_album_artist(
+        match.artist or "",
+        album_artist=raw_album_artist,
+    )
     track_number = (
         info.source_track_number
         if info.source_track_number is not None
@@ -214,7 +225,7 @@ def _merge_source_metadata(match: ITunesTrack, info: TrackInfo) -> ITunesTrack:
     )
     if (
         album == match.album
-        and album_artist == match.album_artist
+        and album_artist == (match.album_artist or "")
         and track_number == match.track_number
         and disc_number == match.disc_number
     ):

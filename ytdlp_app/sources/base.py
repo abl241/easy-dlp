@@ -42,10 +42,12 @@ class MusicTrack:
             return text
         return text[: max_len - 1] + "…"
 
-    def metadata_line(self) -> str:
+    def metadata_line(self, *, max_uploader_len: int = 56) -> str:
         bits: list[str] = []
         if self.album:
-            bits.append(self.album)
+            bits.append(
+                self.album if len(self.album) <= 48 else self.album[:47] + "…",
+            )
         if self.duration_s:
             bits.append(_format_duration(self.duration_s))
         if self.source and self.source != "youtube":
@@ -55,7 +57,10 @@ class MusicTrack:
         elif self.match_status == MATCH_PENDING:
             bits.append("needs YouTube match")
         elif self.youtube_uploader:
-            bits.append(self.youtube_uploader)
+            uploader = self.youtube_uploader
+            if len(uploader) > max_uploader_len:
+                uploader = uploader[: max_uploader_len - 1] + "…"
+            bits.append(uploader)
         return "  ·  ".join(bits)
 
     def is_downloadable(self) -> bool:

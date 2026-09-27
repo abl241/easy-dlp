@@ -120,7 +120,7 @@ class SearchResult:
             return "E"
         return None
 
-    def metadata_line(self) -> str:
+    def metadata_line(self, *, max_uploader_len: int = 56) -> str:
         bits: list[str] = []
         if self.kind in ("album", "playlist"):
             label = self.kind.upper()
@@ -129,7 +129,11 @@ class SearchResult:
             else:
                 bits.append(label)
         if self.uploader:
-            bits.append(self.uploader)
+            # Long multi-artist credits expand the row and clip Download/Change.
+            uploader = self.uploader
+            if len(uploader) > max_uploader_len:
+                uploader = uploader[: max_uploader_len - 1] + "…"
+            bits.append(uploader)
         if self.release_year:
             bits.append(str(self.release_year))
         if self.duration_s:
