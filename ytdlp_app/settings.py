@@ -72,6 +72,8 @@ _DEFAULTS: dict[str, Any] = {
     # the audio-only heuristic is user-togglable.
     "search_audio_only": False,
 
+    "reduce_motion": False,
+
     # UI collapse state
     "panel_active_collapsed": True,  # idle: activity dock collapsed
     "panel_recent_collapsed": True,
