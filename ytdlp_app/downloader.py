@@ -181,7 +181,8 @@ def _attach_progress(
 
         status = d.get("status")
         if status == "downloading":
-            # Always update the percentage (cheap), throttle the text.
+            # Throttle both text and percentage callbacks: each can enqueue UI
+            # work. Cancellation is still checked on every hook invocation.
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             downloaded = d.get("downloaded_bytes") or 0
             pct_num = (downloaded / total * 100.0) if total else 0.0
@@ -199,8 +200,6 @@ def _attach_progress(
                     on_pct(pct_num, msg)
                 else:
                     progress(msg)
-            elif on_pct is not None:
-                on_pct(pct_num, "")  # pct-only update, no log line
         elif status == "finished":
             last_emit["t"] = 0.0
             filename = Path(d.get("filename") or "").name
@@ -404,6 +403,7 @@ def download_music(
     duration_hint: int | None = None,
     thumbnail_hint: str | None = None,
     defer_itunes: bool = False,
+    reserve_output: Callable[[str], None] | None = None,
 ) -> MusicDownloadResult:
     """Download audio as MP3 named by parsed track title.
 
@@ -449,6 +449,8 @@ def download_music(
         filename = sanitize_filename(
             itunes.title if itunes else (parsed.title or raw_title),
         )
+        if reserve_output is not None:
+            reserve_output(str(Path(out_dir) / f"{filename}.mp3"))
         _clear_existing_track_files(Path(out_dir), filename)
 
         per_paths: list[str] = []

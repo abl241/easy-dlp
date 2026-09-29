@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
+from collections import OrderedDict
+from copy import deepcopy
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,6 +16,14 @@ from dataclasses import dataclass
 _USER_AGENT = "easy-dlp/2.1 (music metadata)"
 _SEARCH_URL = "https://itunes.apple.com/search"
 _LOOKUP_URL = "https://itunes.apple.com/lookup"
+
+# Reuse artist/catalog responses across tracks without retaining stale metadata
+# indefinitely. Network I/O stays outside the lock so unrelated artists can load
+# concurrently. Failed requests are never cached.
+_RESULTS_CACHE_TTL_S = 300.0
+_RESULTS_CACHE_MAX = 128
+_results_cache: OrderedDict[str, tuple[float, list[dict]]] = OrderedDict()
+_results_cache_lock = threading.Lock()
 
 # Title tags that usually mean a different recording than the studio track.
 _BAD_VERSION_RE = re.compile(
@@ -204,6 +216,14 @@ def _search_songs(
 
 
 def _fetch_results(url: str) -> list[dict]:
+    with _results_cache_lock:
+        cached = _results_cache.get(url)
+        if cached is not None:
+            expires, rows = cached
+            if time.monotonic() < expires:
+                _results_cache.move_to_end(url)
+                return deepcopy(rows)
+            del _results_cache[url]
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -215,7 +235,16 @@ def _fetch_results(url: str) -> list[dict]:
     results = payload.get("results")
     if not isinstance(results, list):
         return []
-    return [r for r in results if isinstance(r, dict)]
+    rows = [r for r in results if isinstance(r, dict)]
+    if rows:
+        with _results_cache_lock:
+            _results_cache[url] = (
+                time.monotonic() + _RESULTS_CACHE_TTL_S, deepcopy(rows),
+            )
+            _results_cache.move_to_end(url)
+            while len(_results_cache) > _RESULTS_CACHE_MAX:
+                _results_cache.popitem(last=False)
+    return rows
 
 
 def _artwork_url_candidates(url: str, size: int) -> list[str]:

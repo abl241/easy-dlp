@@ -8,6 +8,7 @@ if yt-dlp resolves every video's metadata page).
 from __future__ import annotations
 
 import json
+from contextvars import copy_context
 import re
 import threading
 import urllib.error
@@ -678,11 +679,27 @@ def find_youtube_match_for_track(
     Tries audio-first uploads (Topic channels, official audio), then falls
     back to music videos / any matching upload if nothing passes scoring.
     """
-    from .metadata.parse import ParsedTrack
-    from .rate_limit import set_sleep_interval_requests
+    from .rate_limit import request_interval
 
     cfg = get_match_config(match_quality)
-    set_sleep_interval_requests(cfg.sleep_interval_requests)
+    with request_interval(cfg.sleep_interval_requests):
+        return _find_youtube_match_for_track(
+            artist, title, duration_s, cookies_path=cookies_path,
+            cancel_event=cancel_event, progress=progress,
+            use_youtube_music=use_youtube_music, audio_only=audio_only,
+            match_quality=match_quality, prefer_explicit=prefer_explicit,
+        )
+
+
+def _find_youtube_match_for_track(
+    artist: str, title: str, duration_s: int | None = None, *,
+    cookies_path: str | None = None, cancel_event: threading.Event | None = None,
+    progress: ProgressFn = lambda msg: None, use_youtube_music: bool = False,
+    audio_only: bool = True, match_quality: str = "balanced", prefer_explicit: bool = True,
+) -> SearchResult | None:
+    from .metadata.parse import ParsedTrack
+
+    cfg = get_match_config(match_quality)
 
     query = " ".join(x for x in (artist, title) if x).strip()
     if not query:
@@ -1468,7 +1485,7 @@ def _enrich_collection_results(
 
     workers = min(max(1, int(max_workers)), total)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_enrich_one, item) for item in pending]
+        futures = [pool.submit(copy_context().run, _enrich_one, item) for item in pending]
         for fut in as_completed(futures):
             if cancel_event is not None and cancel_event.is_set():
                 break
@@ -1660,7 +1677,7 @@ def _enrich_flat_results(
 
     workers = min(max(1, max_workers), total)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_enrich_one, item) for item in pending]
+        futures = [pool.submit(copy_context().run, _enrich_one, item) for item in pending]
         for fut in as_completed(futures):
             if cancel_event is not None and cancel_event.is_set():
                 break

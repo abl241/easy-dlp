@@ -105,6 +105,11 @@ def _search_lyrics(
     if best is None or best_score < 0.5:
         return None
 
+    # Search results commonly contain the lyrics already. Only fetch by ID
+    # when the selected result omitted them.
+    lyrics = _payload_to_lyrics(best)
+    if lyrics is not None:
+        return lyrics
     track_id = best.get("id")
     if isinstance(track_id, int):
         return _get_lyrics_by_id(track_id)

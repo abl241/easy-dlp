@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import threading
 import time
+from contextvars import ContextVar
+from contextlib import contextmanager
 from typing import Any, Callable, TypeVar
 
 import yt_dlp
@@ -21,16 +23,25 @@ _INITIAL_BACKOFF_S = 30.0
 _MAX_BACKOFF_S = 600.0
 _BACKOFF_MULTIPLIER = 2.0
 
-_sleep_interval_requests: float | None = None
+_sleep_interval_requests: ContextVar[float | None] = ContextVar("request_interval", default=None)
 
 
 def set_sleep_interval_requests(seconds: float | None) -> None:
-    global _sleep_interval_requests
-    _sleep_interval_requests = seconds
+    _sleep_interval_requests.set(seconds)
 
 
 def get_sleep_interval_requests() -> float | None:
-    return _sleep_interval_requests
+    return _sleep_interval_requests.get()
+
+
+@contextmanager
+def request_interval(seconds: float | None):
+    """Apply pacing to one operation, restoring its caller's setting afterward."""
+    token = _sleep_interval_requests.set(seconds)
+    try:
+        yield
+    finally:
+        _sleep_interval_requests.reset(token)
 
 
 class RateLimitGuard:

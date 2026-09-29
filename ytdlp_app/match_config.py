@@ -23,6 +23,7 @@ class MatchQualityConfig:
     sleep_interval_requests: float
     min_match_score: float
     playlist_parallel: int
+    match_parallel: int = 2
 
     @property
     def label(self) -> str:
@@ -38,7 +39,7 @@ _PRESETS: dict[str, MatchQualityConfig] = {
         inter_track_delay_s=1.5,
         sleep_interval_requests=1.0,
         min_match_score=0.55,
-        playlist_parallel=1,
+        playlist_parallel=2,
     ),
     "balanced": MatchQualityConfig(
         name="balanced",
@@ -48,7 +49,7 @@ _PRESETS: dict[str, MatchQualityConfig] = {
         inter_track_delay_s=1.0,
         sleep_interval_requests=0.75,
         min_match_score=0.55,
-        playlist_parallel=1,
+        playlist_parallel=2,
     ),
     "accurate": MatchQualityConfig(
         name="accurate",
