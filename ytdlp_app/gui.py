@@ -1,14 +1,6 @@
-"""customtkinter front-end.
+"""Desktop media workspace: retained sidebar pages, unified search and a compact queue.
 
-Layout:
-
-    +-----------------------------------------------------------+
-    |  Tabs: [Music | Video | Settings]                       |
-    |  Music: staged workspace (compose → results → rematch)  |
-    |  ... tab content (results expand to fill) ...             |
-    +-----------------------------------------------------------+
-    |  Activity dock: Active | Recent | Log (one slim strip)  |
-    +-----------------------------------------------------------+
+Network and media processing remain on the existing background job queues.
 """
 
 from __future__ import annotations
@@ -27,6 +19,11 @@ from typing import Any, Callable
 import customtkinter as ctk
 
 from . import __version__, thumbcache
+from .ui import (
+    ACCENT, HOVER, MUTED, PANEL, ROW, SIDEBAR, SURFACE, TEXT, VIOLET,
+    SearchField, SidebarPages, SmoothProgress, SourcePanel, Tooltip,
+    artwork_image, install_theme,
+)
 from .jobs import CANCELLED, DONE, FAILED, Job, JobQueue, QUEUED, RUNNING
 from .metadata.parse import parse_youtube_track
 from .music_duplicates import check_music_duplicate, duplicate_location_label
@@ -59,7 +56,7 @@ _MAIN_TAB_NAMES = {
     "settings": "Settings",
 }
 _MAIN_TAB_KEYS = {v: k for k, v in _MAIN_TAB_NAMES.items()}
-_RESULTS_PANEL_COLOR = ("gray92", "gray17")
+_RESULTS_PANEL_COLOR = SURFACE
 
 
 _FORMAT_LABELS = {
@@ -218,17 +215,17 @@ def _recent_metadata_line(job: Job, kinds: list[str]) -> str:
 
 class App(ctk.CTk):
     def __init__(self, settings: Settings) -> None:
+        install_theme()
         super().__init__()
         self.settings = settings
 
         ctk.set_appearance_mode(self.settings.get("theme") or "system")
-        ctk.set_default_color_theme("blue")
 
         self.title(f"easy-dlp {__version__}")
         w = int(self.settings.get("window_width") or 1280)
         h = int(self.settings.get("window_height") or 1000)
         self.geometry(f"{w}x{h}")
-        self.minsize(1000, 800)
+        self.minsize(1080, 720)
         # After Tk is up — AppKit before CTk() crashes Tk 9 on macOS.
         apply_window_icon(self)
 
@@ -318,15 +315,17 @@ class App(ctk.CTk):
             self._log_height = "normal"
 
         # ----- build UI -----
-        # Pack order: bottom dock first, then expanding tabs above it.
-        #     [ Tabs (expand) — staged music workspace ]
-        #     [ Activity dock: Active | Recent | Log   ]
+        # Bottom activity bar first, then the retained sidebar workspace.
         self._build_activity_dock()  # side="bottom" — single slim strip
         self._build_tabs()           # side="top", expand=True — fills the top
         self._setup_scroll_forwarding()
         self._poll_msg_q()
         self._poll_scroll_bottom()
         self._ffmpeg_preflight()
+        modifier = "Command" if sys.platform == "darwin" else "Control"
+        self.bind(f"<{modifier}-f>", self._focus_search)
+        self.bind(f"<{modifier}-comma>", lambda _e: self.tabs.set("Settings"))
+        self.bind("<Escape>", self._dismiss_detail)
 
         # graceful shutdown
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -334,8 +333,9 @@ class App(ctk.CTk):
     # ====================== UI construction =================================
 
     def _build_tabs(self) -> None:
-        self.tabs = ctk.CTkTabview(self, command=self._on_main_tab_changed)
-        self.tabs.pack(side="top", fill="both", expand=True, padx=10, pady=10)
+        self.tabs = SidebarPages(self, command=self._on_main_tab_changed,
+                                 activity_command=self._open_activity)
+        self.tabs.pack(side="top", fill="both", expand=True)
 
         self.music_tab = self.tabs.add("Music")
         self.download_tab = self.tabs.add("Video")
@@ -367,12 +367,12 @@ class App(ctk.CTk):
         opts_bar = ctk.CTkFrame(opts_wrap, fg_color="transparent")
         opts_bar.pack(fill="x")
         ctk.CTkLabel(
-            opts_bar, text="Options", anchor="w",
-            font=ctk.CTkFont(weight="bold"),
+            opts_bar, text="Video", anchor="w",
+            font=ctk.CTkFont(size=28, weight="bold"),
         ).pack(side="left", padx=4)
         self._download_options_toggle_btn = ctk.CTkButton(
             opts_bar, text="Show options ▸", width=120,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._toggle_download_options,
         )
         self._download_options_toggle_btn.pack(side="right", padx=2)
@@ -400,7 +400,7 @@ class App(ctk.CTk):
 
         ctk.CTkButton(
             fmt_frame, text="Output folders…", width=140,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=lambda: self.tabs.set("Settings"),
         ).pack(side="right", padx=6, pady=4)
 
@@ -413,7 +413,7 @@ class App(ctk.CTk):
         input_wrap = ctk.CTkFrame(parent, fg_color="transparent")
         input_wrap.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
 
-        self.source_tabs = ctk.CTkTabview(input_wrap, height=105)
+        self.source_tabs = SourcePanel(input_wrap, bulk_label="Import multiple video links")
         self.source_tabs.pack(fill="x")
         self._build_search_subtab(self.source_tabs.add("Search YouTube"))
         self._build_paste_subtab(self.source_tabs.add("Paste URLs"))
@@ -423,7 +423,7 @@ class App(ctk.CTk):
         )
 
         # ---- results list (expanding row) ----
-        res_outer = ctk.CTkFrame(parent, fg_color=_RESULTS_PANEL_COLOR, border_width=1)
+        res_outer = ctk.CTkFrame(parent, fg_color=_RESULTS_PANEL_COLOR, border_width=0)
         res_outer.grid(row=2, column=0, sticky="nsew", padx=8, pady=(4, 8))
         res_outer.grid_columnconfigure(0, weight=1)
         res_outer.grid_rowconfigure(1, weight=1)
@@ -432,15 +432,16 @@ class App(ctk.CTk):
         header = ctk.CTkFrame(res_outer, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
         self.results_header_label = ctk.CTkLabel(
-            header, text="Results (0) — search or paste a URL above",
+            header, text="Results",
             anchor="w", font=ctk.CTkFont(weight="bold"),
         )
         self.results_header_label.pack(side="left", padx=4)
         ctk.CTkButton(header, text="Clear", width=70,
+                      fg_color="transparent", text_color=MUTED, hover_color=HOVER,
                       command=self._clear_results).pack(side="right", padx=2)
         self._download_more_btn = ctk.CTkButton(
             header, text="⋯", width=36,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._show_download_more_menu,
         )
         self._download_more_btn.pack(side="right", padx=2)
@@ -462,6 +463,7 @@ class App(ctk.CTk):
         )
         self.results_footer.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 6))
         self._bind_results_pagination_watch(self.results_frame)
+        self._video_empty = self._make_empty_state(self._download_results_body, "Find your next video", "Search YouTube or paste a link above.\nImport multiple links to build a download queue.")
         self._render_results()
 
     def _build_search_subtab(self, parent) -> None:
@@ -469,15 +471,16 @@ class App(ctk.CTk):
         row.pack(fill="x", padx=8, pady=(4, 2))
 
         self.search_var = ctk.StringVar(value=self.settings.get("search_query"))
-        entry = ctk.CTkEntry(row, textvariable=self.search_var,
-                             placeholder_text="Type a query, or paste a YouTube URL")
+        entry = SearchField(row, textvariable=self.search_var,
+                             height=40, placeholder_text="Search videos or paste a YouTube link")
+        self.search_entry = entry
         entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        entry.bind("<Return>", lambda _e: self._do_search())
+        entry.bind("<Return>", lambda _e: self._submit_video_input())
 
         ctk.CTkButton(row, text="Search", width=100,
-                      command=self._do_search).pack(side="left", padx=2)
+                      height=40, command=self._submit_video_input).pack(side="left", padx=2)
 
-        ctk.CTkLabel(row, text="Limit:").pack(side="left", padx=(8, 2))
+        ctk.CTkLabel(row, text="Results:").pack(side="left", padx=(8, 2))
         self.limit_var = ctk.StringVar(value=str(self.settings.get("search_limit") or 20))
         ctk.CTkOptionMenu(row, values=["10", "20", "50"],
                           variable=self.limit_var, width=70,
@@ -489,7 +492,7 @@ class App(ctk.CTk):
         filt_row = ctk.CTkFrame(parent, fg_color="transparent")
         filt_row.pack(fill="x", padx=8, pady=(0, 2))
         ctk.CTkLabel(filt_row, text="Filters:",
-                     text_color=("gray40", "gray70")).pack(side="left", padx=(2, 6))
+                     text_color=MUTED).pack(side="left", padx=(2, 6))
 
         self.filter_audio_only_var = ctk.BooleanVar(
             value=bool(self.settings.get("search_audio_only"))
@@ -730,7 +733,7 @@ class App(ctk.CTk):
                   "is on (Music tab). Album/playlist search toggles live on "
                   "the Music tab. Match quality controls playlist speed vs "
                   "accuracy — Fast reduces YouTube requests on large playlists."),
-            text_color=("gray40", "gray70"), wraplength=820, justify="left",
+            text_color=MUTED, wraplength=820, justify="left",
         ).pack(fill="x", padx=14, pady=(0, 8), anchor="w")
 
         self._update_music_search_audio_state()
@@ -751,12 +754,12 @@ class App(ctk.CTk):
         opts_bar = ctk.CTkFrame(opts_wrap, fg_color="transparent")
         opts_bar.pack(fill="x")
         ctk.CTkLabel(
-            opts_bar, text="Options", anchor="w",
-            font=ctk.CTkFont(weight="bold"),
+            opts_bar, text="Music", anchor="w",
+            font=ctk.CTkFont(size=28, weight="bold"),
         ).pack(side="left", padx=4)
         self._music_options_toggle_btn = ctk.CTkButton(
             opts_bar, text="Show options ▸", width=120,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._toggle_music_options,
         )
         self._music_options_toggle_btn.pack(side="right", padx=2)
@@ -788,15 +791,9 @@ class App(ctk.CTk):
                 command=self._on_add_to_apple_music_change,
             ).pack(side="left", padx=8, pady=4)
 
-        ctk.CTkLabel(
-            opts_top,
-            text="MP3 · title filename · metadata auto-applied",
-            text_color=("gray40", "gray70"),
-        ).pack(side="left", padx=(4, 8), pady=4)
-
         ctk.CTkButton(
             opts_top, text="Music settings…", width=130,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=lambda: self.tabs.set("Settings"),
         ).pack(side="right", padx=6, pady=4)
 
@@ -823,7 +820,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             opts_search,
             text="(YouTube Music search only)",
-            text_color=("gray40", "gray70"),
+            text_color=MUTED,
         ).pack(side="left")
         self._update_music_collection_search_state()
 
@@ -847,7 +844,7 @@ class App(ctk.CTk):
         self._music_context_label.pack(side="left", fill="x", expand=True, padx=4)
         self._music_context_new_btn = ctk.CTkButton(
             self._music_context_strip, text="New link", width=90, height=28,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._music_new_link,
         )
         self._music_context_new_btn.pack(side="right", padx=2)
@@ -858,11 +855,11 @@ class App(ctk.CTk):
         # packed conditionally when pending matches exist
         self._music_context_search_btn = ctk.CTkButton(
             self._music_context_strip, text="New search", width=100, height=28,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._music_new_search,
         )
 
-        self.music_source_tabs = ctk.CTkTabview(input_wrap)
+        self.music_source_tabs = SourcePanel(input_wrap)
         self.music_source_tabs.pack(fill="x")
         self._build_music_search_subtab(self.music_source_tabs.add("Search YouTube"))
         self._build_music_paste_subtab(self.music_source_tabs.add("Paste Link"))
@@ -871,7 +868,7 @@ class App(ctk.CTk):
             "Search YouTube" if last == "search" else "Paste Link",
         )
 
-        res_outer = ctk.CTkFrame(parent, fg_color=_RESULTS_PANEL_COLOR, border_width=1)
+        res_outer = ctk.CTkFrame(parent, fg_color=_RESULTS_PANEL_COLOR, border_width=0)
         res_outer.grid(row=2, column=0, sticky="nsew", padx=8, pady=(4, 8))
         res_outer.grid_columnconfigure(0, weight=1)
         res_outer.grid_rowconfigure(1, weight=1)
@@ -882,16 +879,17 @@ class App(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
         self._music_results_header = header
         self.music_results_header_label = ctk.CTkLabel(
-            header, text="Results (0) — search or paste a URL above",
+            header, text="Results",
             anchor="w", font=ctk.CTkFont(weight="bold"),
         )
         self.music_results_header_label.pack(side="left", padx=4)
         self._music_header_actions: dict[str, Any] = {}
         ctk.CTkButton(header, text="Clear", width=70,
+                      fg_color="transparent", text_color=MUTED, hover_color=HOVER,
                       command=self._music_clear_results).pack(side="right", padx=2)
         self._music_more_btn = ctk.CTkButton(
             header, text="⋯", width=36,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._show_music_more_menu,
         )
         self._music_more_btn.pack(side="right", padx=2)
@@ -914,6 +912,7 @@ class App(ctk.CTk):
         self.music_results_footer.grid(row=2, column=0, sticky="ew",
                                        padx=6, pady=(0, 6))
         self._bind_results_pagination_watch(self.music_results_frame)
+        self._music_empty = self._make_empty_state(self._music_results_body, "Your next favorite starts here", "Search for a song, artist, or album.\nOr paste a YouTube or Spotify link to get started.")
         self._music_render_results()
         self._music_update_input_stage()
 
@@ -924,17 +923,18 @@ class App(ctk.CTk):
         self.music_search_var = ctk.StringVar(
             value=self.settings.get("music_search_query"),
         )
-        entry = ctk.CTkEntry(
+        entry = SearchField(
             row, textvariable=self.music_search_var,
-            placeholder_text="Search for a song, or paste a YouTube URL",
+            height=40, placeholder_text="Search music or paste a YouTube / Spotify link",
         )
         entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        entry.bind("<Return>", lambda _e: self._music_do_search())
+        self.music_search_entry = entry
+        entry.bind("<Return>", lambda _e: self._submit_music_input())
 
         ctk.CTkButton(row, text="Search", width=100,
-                      command=self._music_do_search).pack(side="left", padx=2)
+                      height=40, command=self._submit_music_input).pack(side="left", padx=2)
 
-        ctk.CTkLabel(row, text="Limit:").pack(side="left", padx=(8, 2))
+        ctk.CTkLabel(row, text="Results:").pack(side="left", padx=(8, 2))
         self.music_limit_var = ctk.StringVar(
             value=str(self.settings.get("music_search_limit") or 20),
         )
@@ -953,7 +953,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             parent,
             text="Paste a YouTube or Spotify playlist, album, or track URL.",
-            anchor="w", text_color=("gray40", "gray70"),
+            anchor="w", text_color=MUTED,
         ).pack(fill="x", padx=10, pady=(8, 2))
 
         self.music_paste_box = ctk.CTkTextbox(parent, height=55)
@@ -966,7 +966,7 @@ class App(ctk.CTk):
         self._music_track_list_toggle_btn = ctk.CTkButton(
             parent,
             text="▸ Paste track list instead",
-            fg_color="transparent", border_width=1, anchor="w",
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER, anchor="w",
             command=self._toggle_music_track_list,
         )
 
@@ -974,7 +974,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             self.music_track_list_frame,
             text="Or paste a track list (Artist - Title per line):",
-            anchor="w", text_color=("gray40", "gray70"),
+            anchor="w", text_color=MUTED,
         ).pack(fill="x", pady=(0, 2))
         self.music_track_list_box = ctk.CTkTextbox(self.music_track_list_frame, height=45)
         self.music_track_list_box.pack(fill="x")
@@ -1272,7 +1272,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             parent,
             text="*Output directory must be different from the audio/thumb source.",
-            anchor="w", text_color=("gray40", "gray70"),
+            anchor="w", text_color=MUTED,
         ).pack(fill="x", padx=10, pady=(2, 0))
 
         def go() -> None:
@@ -1304,6 +1304,8 @@ class App(ctk.CTk):
     # ------------------------- Settings tab ---------------------------------
 
     def _build_settings_tab(self, parent) -> None:
+        ctk.CTkLabel(parent, text="Settings", anchor="w",
+                     font=ctk.CTkFont(size=28, weight="bold")).pack(fill="x", padx=12, pady=(6, 12))
         scroll = ctk.CTkScrollableFrame(parent)
         scroll.pack(fill="both", expand=True, padx=8, pady=8)
         self._settings_scroll_frame = scroll
@@ -1337,7 +1339,7 @@ class App(ctk.CTk):
             s_music,
             text=("Downloads MP3 files named by track title. Artist, album, "
                   "cover art, and lyrics are written into file metadata."),
-            text_color=("gray40", "gray70"), wraplength=820, justify="left",
+            text_color=MUTED, wraplength=820, justify="left",
         ).pack(fill="x", padx=14, pady=(0, 4), anchor="w")
         self._build_music_settings_options(s_music)
 
@@ -1353,7 +1355,7 @@ class App(ctk.CTk):
             s_cookies,
             text=("Optional Netscape-format cookies file for age-restricted / "
                   "member-only videos. See cookies.txt.example for instructions."),
-            text_color=("gray40", "gray70"), wraplength=820, justify="left",
+            text_color=MUTED, wraplength=820, justify="left",
         ).pack(fill="x", padx=14, pady=(0, 8), anchor="w")
 
         s_debug = section("Debug")
@@ -1445,6 +1447,12 @@ class App(ctk.CTk):
                 side="left", padx=6,
             )
 
+        reduce_var = ctk.BooleanVar(value=bool(self.settings.get("reduce_motion")))
+        ctk.CTkCheckBox(
+            s_appear, text="Reduce motion", variable=reduce_var,
+            command=lambda: self.settings.set("reduce_motion", reduce_var.get()),
+        ).pack(anchor="w", padx=14, pady=(0, 12))
+
         scroll_row = ctk.CTkFrame(s_appear, fg_color="transparent")
         scroll_row.pack(fill="x", padx=10, pady=(0, 8))
         ctk.CTkLabel(scroll_row, text="Scroll direction:", width=220,
@@ -1472,7 +1480,7 @@ class App(ctk.CTk):
             s_legacy,
             text="Embed Thumbnail — older workflow for attaching cover art to "
                  "existing audio files. Prefer Music mode for new downloads.",
-            text_color=("gray40", "gray70"), wraplength=820, justify="left",
+            text_color=MUTED, wraplength=820, justify="left",
         ).pack(fill="x", padx=14, pady=(8, 2), anchor="w")
         self._build_embed_thumbnail_ui(s_legacy)
 
@@ -1499,7 +1507,7 @@ class App(ctk.CTk):
         # Reset
         ctk.CTkButton(scroll, text="Reset all settings to defaults",
                       command=self._confirm_reset,
-                      fg_color="transparent", border_width=1).pack(
+                      fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER).pack(
             fill="x", padx=10, pady=(10, 10),
         )
 
@@ -1508,7 +1516,7 @@ class App(ctk.CTk):
     # ---- Heights used by the activity dock.
     _ACTIVE_EXPANDED_H = 150
     _RECENT_EXPANDED_H = 110
-    _COLLAPSED_H = 32
+    _COLLAPSED_H = 64
 
     _PANEL_HEIGHTS = {"normal": None, "large": None, "xlarge": None}
 
@@ -1539,8 +1547,8 @@ class App(ctk.CTk):
 
     def _build_activity_dock(self) -> None:
         """Single bottom dock with Active | Recent | Log segments."""
-        outer = ctk.CTkFrame(self, height=self._COLLAPSED_H)
-        outer.pack(side="bottom", fill="x", padx=10, pady=(0, 8))
+        outer = ctk.CTkFrame(self, height=self._COLLAPSED_H, fg_color=PANEL, corner_radius=0)
+        outer.pack(side="bottom", fill="x")
         outer.pack_propagate(False)
         self._activity_dock = outer
         # Aliases kept for any remaining references / popout restore.
@@ -1549,7 +1557,7 @@ class App(ctk.CTk):
         self._log_outer = outer
 
         header = ctk.CTkFrame(outer, fg_color="transparent")
-        header.pack(fill="x", padx=6, pady=(2, 0))
+        header.pack(fill="x", padx=16, pady=(8, 4))
         self._activity_header = header
 
         seg_row = ctk.CTkFrame(header, fg_color="transparent")
@@ -1562,7 +1570,7 @@ class App(ctk.CTk):
         ):
             btn = ctk.CTkButton(
                 seg_row, text=label, width=78, height=24,
-                fg_color="transparent", border_width=1,
+                fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
                 command=lambda k=key: self._on_activity_segment_click(k),
             )
             btn.pack(side="left", padx=1)
@@ -1572,8 +1580,8 @@ class App(ctk.CTk):
         self.active_header = self._activity_seg_btns["active"]
         self.recent_header = self._activity_seg_btns["recent"]
 
-        self.status_var = ctk.StringVar(value="Ready")
-        ctk.CTkLabel(header, textvariable=self.status_var, anchor="w").pack(
+        self.status_var = ctk.StringVar(value="Ready when you are")
+        ctk.CTkLabel(header, textvariable=self.status_var, anchor="w", width=100, text_color=MUTED).pack(
             side="left", fill="x", expand=True, padx=(8, 4),
         )
 
@@ -1581,7 +1589,8 @@ class App(ctk.CTk):
         self._activity_actions.pack(side="right")
 
         self._activity_toggle_btn = ctk.CTkButton(
-            header, text="Show ▸", width=72, height=24,
+            header, text="Show ▸", width=72, height=28,
+            fg_color="transparent", text_color=TEXT, hover_color=HOVER,
             command=self._toggle_activity_dock,
         )
         self._activity_toggle_btn.pack(side="right", padx=(2, 0))
@@ -1590,12 +1599,12 @@ class App(ctk.CTk):
         self._active_size_btn = ctk.CTkButton(
             self._activity_actions,
             text=str(self.settings.get("panel_active_height") or "normal").capitalize(),
-            width=80, height=24, fg_color="transparent", border_width=1,
+            width=80, height=24, fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._cycle_active_height,
         )
         self._active_popout_btn = ctk.CTkButton(
             self._activity_actions, text="Pop out", width=72, height=24,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._toggle_active_popout,
         )
         self._active_cancel_btn = ctk.CTkButton(
@@ -1605,12 +1614,12 @@ class App(ctk.CTk):
         self._recent_size_btn = ctk.CTkButton(
             self._activity_actions,
             text=str(self.settings.get("panel_recent_height") or "normal").capitalize(),
-            width=80, height=24, fg_color="transparent", border_width=1,
+            width=80, height=24, fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._cycle_recent_height,
         )
         self._recent_popout_btn = ctk.CTkButton(
             self._activity_actions, text="Pop out", width=72, height=24,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._toggle_recent_popout,
         )
         self._recent_clear_btn = ctk.CTkButton(
@@ -1624,24 +1633,31 @@ class App(ctk.CTk):
         )
         self._log_latest_btn = ctk.CTkButton(
             self._activity_actions, text="↓ Latest", width=72, height=24,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._log_jump_to_latest,
         )
         self._log_size_btn = ctk.CTkButton(
             self._activity_actions,
             text=_LOG_HEIGHT_LABELS.get(self._log_height, "Size"),
-            width=100, height=24, fg_color="transparent", border_width=1,
+            width=100, height=24, fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._cycle_log_height,
         )
         self._log_popout_btn = ctk.CTkButton(
             self._activity_actions, text="Pop out", width=72, height=24,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._toggle_log_popout,
         )
         self._log_clear_btn = ctk.CTkButton(
             self._activity_actions, text="Clear", width=64, height=24,
             command=self._clear_log,
         )
+
+        self._summary_progress = SmoothProgress(
+            outer, height=3, corner_radius=0,
+            reduced_motion=lambda: bool(self.settings.get("reduce_motion")),
+        )
+        self._summary_progress.pack(fill="x", padx=16, pady=(0, 6))
+        self._summary_jobs: dict[int, tuple[str, float]] = {}
 
         # Bodies live in one container; only the selected segment is packed.
         self._activity_body = ctk.CTkFrame(outer, fg_color="transparent")
@@ -1752,21 +1768,75 @@ class App(ctk.CTk):
     def _update_activity_segment_styles(self) -> None:
         for key, btn in self._activity_seg_btns.items():
             if key == self._activity_segment and not self._activity_collapsed:
-                btn.configure(fg_color=("gray75", "gray35"), border_width=0)
+                btn.configure(fg_color=HOVER, text_color=VIOLET, border_width=0)
             else:
-                btn.configure(fg_color="transparent", border_width=1)
+                btn.configure(fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER)
 
-    def _ensure_active_expanded(self) -> None:
-        if (
-            self._activity_collapsed
-            or self._activity_segment != "active"
-        ):
-            self._activity_segment = "active"
-            self._activity_collapsed = False
-            self.settings.set("activity_dock_segment", "active")
-            self._apply_activity_dock_layout()
-            self._persist_activity_collapse_flags()
-            self._schedule_results_scroll_height_sync()
+    def _open_activity(self, segment: str) -> None:
+        self._activity_segment = segment
+        self._activity_collapsed = False
+        self._apply_activity_dock_layout()
+        self._persist_activity_collapse_flags()
+        self._schedule_results_scroll_height_sync()
+
+    def _focus_search(self, _event=None):
+        if self.tabs.get() == "Settings":
+            self.tabs.set("Music")
+        entry = self.music_search_entry if self.tabs.get() == "Music" else self.search_entry
+        entry.focus_set()
+        entry.select_range(0, "end")
+        return "break"
+
+    def _dismiss_detail(self, _event=None):
+        if self._music_alternate_open_index is not None:
+            self._music_close_rematch()
+        elif not self._activity_collapsed:
+            self._toggle_activity_dock()
+        else:
+            panel = self.music_source_tabs if self.tabs.get() == "Music" else self.source_tabs
+            panel.set("Search YouTube")
+        return "break"
+
+    def _input_busy(self, context: str) -> bool:
+        busy = any(
+            j.kind in ("search", "resolve", "source_resolve", "source_match_all", "search_more")
+            and j.params.get("results_context", "download") == context
+            for j in self.jobs.active()
+        )
+        if busy:
+            self._set_status("Still working on this search. Cancel it in Downloads to start another.")
+        return busy
+
+    def _submit_music_input(self) -> None:
+        if self._input_busy("music"):
+            return
+        query = self.music_search_var.get().strip()
+        self._music_close_rematch(render=False)
+        if not self.music_results_frame.winfo_ismapped():
+            self.music_results_frame.pack(fill="both", expand=True)
+        if is_url(query):
+            self.music_paste_box.delete("1.0", "end")
+            self.music_paste_box.insert("1.0", query)
+            # An unrelated saved track list must not accompany a single link.
+            platform = detect_platform(query)
+            self._music_do_resolve(platform=platform, single_url=query)
+        else:
+            self._music_do_search()
+        if query:
+            self._set_status("Looking up “" + _truncate(query, 64) + "”…")
+
+    def _submit_video_input(self) -> None:
+        if self._input_busy("download"):
+            return
+        query = self.search_var.get().strip()
+        if is_url(query):
+            self.paste_box.delete("1.0", "end")
+            self.paste_box.insert("1.0", query)
+            self._do_resolve()
+        else:
+            self._do_search()
+        if query:
+            self._set_status("Looking up “" + _truncate(query, 64) + "”…")
 
     # Legacy toggle entry points (menus / old callers).
     def _toggle_active(self) -> None:
@@ -2237,11 +2307,15 @@ class App(ctk.CTk):
         *,
         platform: str | None = None,
         preserve_auto_download: bool = False,
+        single_url: str | None = None,
     ) -> None:
         text = self.music_paste_box.get("1.0", "end").strip()
         track_text = self.music_track_list_box.get("1.0", "end").strip()
+        if single_url is not None:
+            text, track_text = single_url, ""
         self.settings.set("music_paste_urls", text)
-        self.settings.set("music_track_list", track_text)
+        if single_url is None:
+            self.settings.set("music_track_list", track_text)
         self.settings.set("music_source_tab", "paste")
         if not preserve_auto_download:
             self._music_auto_download = False
@@ -2470,7 +2544,6 @@ class App(ctk.CTk):
         title = result.display_title(50)
         if collection_url in self._pending_collection_urls:
             self._set_status(f"Still expanding {kind_label.lower()}: {title}…")
-            self._ensure_active_expanded()
             self._music_set_collection_row_busy(collection_url, True)
             return
         self._pending_collection_urls.add(collection_url)
@@ -2479,7 +2552,6 @@ class App(ctk.CTk):
         self.music_results_header_label.configure(
             text=f"Results — expanding {kind_label.lower()}: {_truncate(title, 50)}",
         )
-        self._ensure_active_expanded()
         label = f"{kind_label}: expand {result.display_title(60)}"
         self.jobs.enqueue(
             kind="resolve",
@@ -2711,7 +2783,27 @@ class App(ctk.CTk):
 
     # ====================== Rendering ======================================
 
+    def _make_empty_state(self, parent, title, detail):
+        frame = ctk.CTkFrame(parent, fg_color=SURFACE)
+        ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(0, 8))
+        ctk.CTkLabel(frame, text=detail, text_color=MUTED,
+                     font=ctk.CTkFont(size=14), justify="center").pack()
+        return frame
+
+    def _update_empty_states(self) -> None:
+        for name, has_content in (("_video_empty", bool(self.results)),
+                                  ("_music_empty", bool(self.music_results or self.music_tracks))):
+            frame = getattr(self, name, None)
+            if frame is not None:
+                shown = bool(frame.place_info())
+                if has_content and shown:
+                    frame.place_forget()
+                elif not has_content and not shown:
+                    frame.place(relx=0.5, rely=0.4, anchor="center")
+                    frame.lift()
+
     def _render_results(self) -> None:
+        self._update_empty_states()
         self._clear_loading_indicator()
         self._results_render_token += 1
         token = self._results_render_token
@@ -2723,7 +2815,7 @@ class App(ctk.CTk):
             self.results_header_label.configure(text=f"Results ({len(self.results)})")
         else:
             self.results_header_label.configure(
-                text="Results (0) — search or paste a URL above"
+                text="Results"
             )
         self._update_search_scroll_footer()
         self._schedule_scroll_bottom_check()
@@ -2758,6 +2850,7 @@ class App(ctk.CTk):
         self._render_results()
 
     def _music_render_results(self) -> None:
+        self._update_empty_states()
         if (
             self._music_alternate_open_index is not None
             and self._music_rematch_panel is not None
@@ -2794,7 +2887,7 @@ class App(ctk.CTk):
                 self.music_results_header_label.configure(text=header)
             else:
                 self.music_results_header_label.configure(
-                    text="Results (0) — search or paste a link above",
+                    text="Songs & albums",
                 )
             self._music_header_actions = {
                 "match": bool(pending_n),
@@ -2816,7 +2909,7 @@ class App(ctk.CTk):
             )
         else:
             self.music_results_header_label.configure(
-                text="Results (0) — search or paste a link above",
+                text="Songs & albums",
             )
         self._music_update_scroll_footer()
         self._schedule_scroll_bottom_check()
@@ -2901,7 +2994,7 @@ class App(ctk.CTk):
                 command=self._music_load_more_results,
                 fg_color="transparent",
                 border_width=1,
-                text_color=("gray20", "gray80"),
+                text_color=TEXT,
             )
             self._music_scroll_footer.pack(fill="x", padx=8, pady=4)
 
@@ -2923,7 +3016,7 @@ class App(ctk.CTk):
                 command=self._load_more_results,
                 fg_color="transparent",
                 border_width=1,
-                text_color=("gray20", "gray80"),
+                text_color=TEXT,
             )
             self._search_scroll_footer.pack(fill="x", padx=8, pady=4)
 
@@ -2931,7 +3024,7 @@ class App(ctk.CTk):
         return bool(self.music_tracks) or bool(self.music_results)
 
     def _music_update_input_stage(self) -> None:
-        """Stage A = compose (source tabs); Stage B = review (context strip)."""
+        """Keep search accessible while presenting review/matching context."""
         has_content = self._music_has_workspace_content()
         rematch_open = self._music_alternate_open_index is not None
         show_compose = not has_content and not rematch_open
@@ -2946,8 +3039,8 @@ class App(ctk.CTk):
             self.music_source_tabs.pack(fill="x")
             return
 
-        self._music_input_collapsed = True
-        self.music_source_tabs.pack_forget()
+        self._music_input_collapsed = False
+        self.music_source_tabs.pack(fill="x")
 
         # Context strip summary.
         if rematch_open:
@@ -3358,7 +3451,7 @@ class App(ctk.CTk):
         self._clear_loading_indicator()
         self._loading_more_label = ctk.CTkLabel(
             self.results_footer, text=text,
-            text_color=("gray40", "gray70"),
+            text_color=MUTED,
         )
         self._loading_more_label.pack(fill="x", padx=8, pady=4)
 
@@ -3379,7 +3472,7 @@ class App(ctk.CTk):
                 pass
         self._music_loading_more_label = ctk.CTkLabel(
             self.music_results_footer, text=text,
-            text_color=("gray40", "gray70"),
+            text_color=MUTED,
         )
         self._music_loading_more_label.pack(fill="x", padx=8, pady=4)
 
@@ -3598,7 +3691,6 @@ class App(ctk.CTk):
         # user already sees the in-place "Loading more results..." indicator.
         if job.is_active:
             if job.kind != "search_more":
-                self._ensure_active_expanded()
                 row = self._active_rows.get(job.id)
                 if row is None:
                     row = _ActiveRow(self.active_frame, job, self)
@@ -4082,6 +4174,22 @@ class App(ctk.CTk):
                     self._set_status(f"[done] {job.label}")
 
             self.jobs.clear_recent()  # let JobQueue drop its terminal copies
+
+        if job.kind != "search_more":
+            if job.is_active:
+                self._summary_jobs[job.id] = (job.label, job.progress_pct or 0.0)
+            else:
+                self._summary_jobs.pop(job.id, None)
+            count = len(self._summary_jobs)
+            self.tabs.buttons["active"].configure(text=f"↓   Downloads  {count}" if count else "↓   Downloads")
+            if count:
+                label, pct = next(iter(self._summary_jobs.values()))
+                self._set_status(f"{_truncate(label, 48)} · {count} active")
+                self._summary_progress.move_to(pct / 100)
+            else:
+                self._summary_progress.move_to(0)
+
+        self._update_empty_states()
 
         # Update headers
         self.active_header.configure(text=f"Active ({len(self._active_rows)})")
@@ -4615,8 +4723,8 @@ class App(ctk.CTk):
 
     def _on_close(self) -> None:
         try:
-            w = max(1000, int(self.winfo_width()))
-            h = max(800, int(self.winfo_height()))
+            w = max(1080, int(self.winfo_width()))
+            h = max(720, int(self.winfo_height()))
             self.settings.set("window_width", w)
             self.settings.set("window_height", h)
         except (TypeError, ValueError, Exception):  # noqa: BLE001
@@ -4688,7 +4796,7 @@ class _MusicAlternateResultRow:
         meta = result.metadata_line()
         if meta:
             ctk.CTkLabel(
-                text_col, text=meta, anchor="w", text_color=("gray40", "gray70"),
+                text_col, text=meta, anchor="w", text_color=MUTED,
                 wraplength=360, justify="left",
             ).pack(fill="x")
 
@@ -4750,7 +4858,7 @@ class _MusicAlternatePanel:
         self._alive = True
         self._rows: list[_MusicAlternateResultRow] = []
 
-        self.frame = ctk.CTkFrame(parent, fg_color=("gray92", "gray20"))
+        self.frame = ctk.CTkFrame(parent, fg_color=PANEL)
         if fill_parent:
             self.frame.pack(fill="both", expand=True, padx=4, pady=4)
             self.frame.grid_columnconfigure(0, weight=1)
@@ -4769,13 +4877,13 @@ class _MusicAlternatePanel:
         ).pack(side="left")
         ctk.CTkButton(
             header, text="Close", width=70,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=lambda: app._music_close_rematch(),
         ).pack(side="right")
         if self._current_url:
             ctk.CTkButton(
                 header, text="View match", width=100,
-                fg_color="transparent", border_width=1,
+                fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
                 command=lambda: webbrowser.open(self._current_url),
             ).pack(side="right", padx=4)
 
@@ -4805,7 +4913,7 @@ class _MusicAlternatePanel:
             cur_lbl = ctk.CTkLabel(
                 self.frame,
                 text=f"Current: {current_label}",
-                anchor="w", text_color=("gray40", "gray70"),
+                anchor="w", text_color=MUTED,
                 wraplength=900, justify="left",
             )
             if fill_parent:
@@ -4847,7 +4955,7 @@ class _MusicAlternatePanel:
 
         self.status_label = ctk.CTkLabel(
             self.frame, text="Searching YouTube…",
-            anchor="w", text_color=("gray40", "gray70"),
+            anchor="w", text_color=MUTED,
         )
         if fill_parent:
             self.status_label.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 2))
@@ -4932,26 +5040,27 @@ class _MusicTrackRow:
         self.app = app
         self.track_index = track_index
         self._alive = True
+        self._thumb_size = (56, 56)
 
         self.outer = ctk.CTkFrame(parent, fg_color="transparent")
-        self.outer.pack(fill="x", padx=4, pady=3)
+        self.outer.pack(fill="x", padx=4, pady=2)
 
         border_kw: dict[str, Any] = {}
         if track.match_status == MATCH_FAILED:
             border_kw = {"border_width": 2, "border_color": ("#c44", "#f55")}
 
-        self.frame = ctk.CTkFrame(self.outer, **border_kw)
+        self.frame = ctk.CTkFrame(self.outer, fg_color=ROW, corner_radius=8, **border_kw)
         self.frame.pack(fill="x")
 
         thumb_url = track.cover_url or track.thumbnail_url
         self._ctk_image = ctk.CTkImage(
-            light_image=thumbcache.placeholder(_THUMB_SIZE),
-            dark_image=thumbcache.placeholder(_THUMB_SIZE),
-            size=_THUMB_SIZE,
+            light_image=thumbcache.placeholder(self._thumb_size),
+            dark_image=thumbcache.placeholder(self._thumb_size),
+            size=self._thumb_size,
         )
         self.thumb_label = ctk.CTkLabel(
             self.frame, text="", image=self._ctk_image,
-            width=_THUMB_SIZE[0], height=_THUMB_SIZE[1],
+            width=self._thumb_size[0], height=self._thumb_size[1],
         )
         self.thumb_label.pack(side="left", padx=(6, 8), pady=6)
 
@@ -4961,24 +5070,25 @@ class _MusicTrackRow:
         if track.is_downloadable():
             more_btn = ctk.CTkButton(
                 btn_col, text="⋯", width=36,
-                fg_color="transparent", border_width=1,
+                fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
                 command=lambda: self._show_row_menu(),
             )
             more_btn.pack(side="right", padx=2)
             self._more_btn = more_btn
             ctk.CTkButton(
                 btn_col, text="Change", width=80,
-                fg_color="transparent", border_width=1,
+                fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
                 command=lambda: app._music_toggle_alternate(track_index),
             ).pack(side="right", padx=2)
             ctk.CTkButton(
-                btn_col, text="Download", width=110,
+                btn_col, text="Download", width=100,
+                fg_color="transparent", text_color=ACCENT, hover_color=HOVER,
                 command=lambda: app._music_download_one_track(track, override=False),
             ).pack(side="right", padx=2)
         elif track.match_status == MATCH_PENDING:
             self._more_btn = None
             ctk.CTkLabel(
-                btn_col, text="Match first", text_color=("gray40", "gray70"),
+                btn_col, text="Match first", text_color=MUTED,
             ).pack(side="right", padx=8)
         else:
             self._more_btn = None
@@ -4988,25 +5098,27 @@ class _MusicTrackRow:
             ).pack(side="right", padx=2)
             ctk.CTkButton(
                 btn_col, text="Retry", width=80,
-                fg_color="transparent", border_width=1,
+                fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
                 command=lambda: app._music_retry_track(track_index),
             ).pack(side="right", padx=2)
 
         text_col = ctk.CTkFrame(self.frame, fg_color="transparent")
         text_col.pack(side="left", fill="x", expand=True, padx=2, pady=6)
-        ctk.CTkLabel(
-            text_col, text=track.display_title(),
+        title_label = ctk.CTkLabel(
+            text_col, text=track.display_title(68),
             anchor="w", font=ctk.CTkFont(weight="bold"),
-            wraplength=420, justify="left",
-        ).pack(fill="x")
+            wraplength=0, justify="left",
+        )
+        title_label.pack(fill="x")
+        Tooltip(title_label, f"{track.artist} — {track.title}")
         meta = track.metadata_line()
         if meta:
-            color = ("gray40", "gray70")
+            color = MUTED
             if track.match_status == MATCH_FAILED:
                 color = ("#a33", "#f66")
             ctk.CTkLabel(
                 text_col, text=meta, anchor="w", text_color=color,
-                wraplength=420, justify="left",
+                wraplength=0, justify="left",
             ).pack(fill="x")
 
         app._bind_results_mousewheel(self.frame)
@@ -5034,9 +5146,9 @@ class _MusicTrackRow:
                 if not self._alive:
                     return
                 try:
-                    resized = img.resize(_THUMB_SIZE)
+                    resized = artwork_image(img, self._thumb_size)
                     self._ctk_image.configure(
-                        light_image=resized, dark_image=resized, size=_THUMB_SIZE,
+                        light_image=resized, dark_image=resized, size=self._thumb_size,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -5052,9 +5164,9 @@ class _MusicTrackRow:
         if not self._alive or img is None:
             return
         try:
-            resized = img.resize(_THUMB_SIZE)
+            resized = artwork_image(img, self._thumb_size)
             self._ctk_image.configure(
-                light_image=resized, dark_image=resized, size=_THUMB_SIZE,
+                light_image=resized, dark_image=resized, size=self._thumb_size,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -5080,8 +5192,10 @@ class _ResultRow:
         result_index: int = 0,
     ) -> None:
         self.result = result
+        self.mode = mode
         self.app = app
         self._alive = True
+        self._thumb_size = (56, 56) if mode == "music" else (100, 56)
 
         if mode == "music":
             if result.kind in ("album", "playlist"):
@@ -5093,7 +5207,7 @@ class _ResultRow:
                 folder_fn = lambda: app._music_download_one(result, override=True)
                 btn_text = "Download"
             self.outer = ctk.CTkFrame(parent, fg_color="transparent")
-            self.outer.pack(fill="x", padx=4, pady=3)
+            self.outer.pack(fill="x", padx=4, pady=2)
             row_parent = self.outer
         else:
             download_fn = lambda: app._download_one(result, override=False)
@@ -5101,18 +5215,18 @@ class _ResultRow:
             btn_text = "Download"
             row_parent = parent
 
-        self.frame = ctk.CTkFrame(row_parent)
-        self.frame.pack(fill="x", padx=(0 if mode == "music" else 4), pady=(0 if mode == "music" else 3))
+        self.frame = ctk.CTkFrame(row_parent, fg_color=ROW, corner_radius=8)
+        self.frame.pack(fill="x", padx=(0 if mode == "music" else 4), pady=(0 if mode == "music" else 2))
 
         # Thumbnail (left).
         self._ctk_image = ctk.CTkImage(
-            light_image=thumbcache.placeholder(_THUMB_SIZE),
-            dark_image=thumbcache.placeholder(_THUMB_SIZE),
-            size=_THUMB_SIZE,
+            light_image=thumbcache.placeholder(self._thumb_size),
+            dark_image=thumbcache.placeholder(self._thumb_size),
+            size=self._thumb_size,
         )
         self.thumb_label = ctk.CTkLabel(
             self.frame, text="", image=self._ctk_image,
-            width=_THUMB_SIZE[0], height=_THUMB_SIZE[1],
+            width=self._thumb_size[0], height=self._thumb_size[1],
         )
         self.thumb_label.pack(side="left", padx=(6, 8), pady=6)
 
@@ -5126,16 +5240,18 @@ class _ResultRow:
         if mode == "music" and result.kind == "track":
             ctk.CTkButton(
                 btn_col, text="Change", width=80,
-                fg_color="transparent", border_width=1,
+                fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
                 command=lambda: app._music_toggle_alternate(result_index),
             ).pack(side="right", padx=2)
         self._folder_btn = ctk.CTkButton(
-            btn_col, text="📁", width=44, command=folder_fn,
+            btn_col, text="Save to…", width=74, command=folder_fn,
+            fg_color="transparent", text_color=MUTED, hover_color=HOVER,
         )
         self._folder_btn.pack(side="right", padx=2)
         dl_width = 140 if mode == "music" and result.kind in ("album", "playlist") else 110
         self._download_btn = ctk.CTkButton(
             btn_col, text=btn_text, width=dl_width, command=download_fn,
+            fg_color="transparent", text_color=ACCENT, hover_color=HOVER,
         )
         self._download_btn.pack(side="right", padx=2)
         if (
@@ -5173,21 +5289,23 @@ class _ResultRow:
                     else ("#9a4a4a", "#c88888")
                 ),
             ).pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(
+        title_label = ctk.CTkLabel(
             title_row,
-            text=result.display_title(),
+            text=result.display_title(68),
             anchor="w",
             font=ctk.CTkFont(weight="bold"),
-            wraplength=420,
+            wraplength=0,
             justify="left",
-        ).pack(side="left", fill="x", expand=True)
-        meta = result.metadata_line()
+        )
+        title_label.pack(side="left", fill="x", expand=True)
+        Tooltip(title_label, result.title + "\n" + result.metadata_line())
+        meta = self._metadata_text(result)
         self._meta_label: ctk.CTkLabel | None = None
         if meta:
             self._meta_label = ctk.CTkLabel(
                 text_col, text=meta, anchor="w",
-                text_color=("gray40", "gray70"),
-                wraplength=420, justify="left",
+                text_color=MUTED,
+                wraplength=0, justify="left",
             )
             self._meta_label.pack(fill="x")
 
@@ -5199,6 +5317,13 @@ class _ResultRow:
         # Kick off the thumbnail fetch. The cache callback may fire on a
         # worker thread, so we hop back to the Tk main loop via `after`.
         self._kick_off_thumb_fetch()
+
+    def _metadata_text(self, result: SearchResult) -> str:
+        if self.mode == "music" and result.kind == "track":
+            return "  ·  ".join(bit for bit in (
+                result.uploader, _format_duration(result.duration_s) if result.duration_s else "",
+            ) if bit)
+        return result.metadata_line()
 
     def set_collection_busy(self, busy: bool) -> None:
         """Show Expanding… and disable buttons while an album/playlist resolves."""
@@ -5232,7 +5357,7 @@ class _ResultRow:
             return
         old_thumb = self.result.thumbnail_url
         self.result = result
-        meta = result.metadata_line()
+        meta = self._metadata_text(result)
         if self._meta_label is not None:
             if meta:
                 self._meta_label.configure(text=meta)
@@ -5252,9 +5377,9 @@ class _ResultRow:
                 if not self._alive:
                     return
                 try:
-                    resized = img.resize(_THUMB_SIZE)
+                    resized = artwork_image(img, self._thumb_size)
                     self._ctk_image.configure(
-                        light_image=resized, dark_image=resized, size=_THUMB_SIZE,
+                        light_image=resized, dark_image=resized, size=self._thumb_size,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -5272,9 +5397,9 @@ class _ResultRow:
         if not self._alive or img is None:
             return
         try:
-            resized = img.resize(_THUMB_SIZE)
+            resized = artwork_image(img, self._thumb_size)
             self._ctk_image.configure(
-                light_image=resized, dark_image=resized, size=_THUMB_SIZE,
+                light_image=resized, dark_image=resized, size=self._thumb_size,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -5304,7 +5429,7 @@ class _LogPopout(ctk.CTkToplevel):
         bar.pack(fill="x", padx=8, pady=(6, 2))
         self._latest_btn = ctk.CTkButton(
             bar, text="↓ Latest", width=80,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self.jump_to_latest,
         )
         ctk.CTkButton(
@@ -5460,7 +5585,7 @@ class _MatchDetailDialog(ctk.CTkToplevel):
         ).pack(side="left", padx=2)
         ctk.CTkButton(
             btn_row, text="Change match", width=110,
-            fg_color="transparent", border_width=1,
+            fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
             command=self._change_match,
         ).pack(side="left", padx=2)
         ctk.CTkButton(
@@ -5529,7 +5654,7 @@ class _MatchReviewDialog(ctk.CTkToplevel):
             ).pack(side="right", padx=2)
             ctk.CTkButton(
                 row, text="View", width=60,
-                fg_color="transparent", border_width=1,
+                fg_color="transparent", border_width=0, text_color=TEXT, hover_color=HOVER,
                 command=lambda idx=i, t=track: _MatchDetailDialog(app, t, idx),
             ).pack(side="right", padx=2)
 
@@ -5561,7 +5686,7 @@ class _ActiveRow:
         self.bar.set(0)
         self.status = ctk.CTkLabel(bottom, text=job.progress_msg or job.state,
                                    anchor="w",
-                                   text_color=("gray40", "gray70"),
+                                   text_color=MUTED,
                                    width=380)
         self.status.pack(side="left")
 
@@ -5611,7 +5736,7 @@ class _RecentRow:
         self.title_label.pack(fill="x")
         self.meta_label = ctk.CTkLabel(
             text_col, text="", anchor="w", justify="left",
-            text_color=("gray40", "gray70"), wraplength=700,
+            text_color=MUTED, wraplength=700,
         )
         self.meta_label.pack(fill="x")
         self.error_label = ctk.CTkLabel(
@@ -5664,7 +5789,7 @@ class _RecentRow:
     def _refresh(self) -> None:
         state = self.worst_state()
         glyph = self._GLYPH.get(state, "·")
-        glyph_color = self._GLYPH_COLOR.get(state, ("gray40", "gray70"))
+        glyph_color = self._GLYPH_COLOR.get(state, MUTED)
         self._glyph_label.configure(text=glyph, text_color=glyph_color)
 
         if state == FAILED:
