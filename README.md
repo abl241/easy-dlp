@@ -1,788 +1,170 @@
-<div align="center">
-
 # easy-dlp
 
-### A modern desktop app for searching, downloading, and tagging music from YouTube and Spotify — no terminal required.
+**Find music, preview it, and build a library you can keep.**
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![yt-dlp](https://img.shields.io/badge/powered%20by-yt--dlp-red.svg)](https://github.com/yt-dlp/yt-dlp)
-[![License](https://img.shields.io/badge/license-personal--use-lightgrey.svg)](#license)
+A Python desktop app by [Alex Lee](https://github.com/abl241) for searching YouTube, saving tagged music and videos, identifying songs, and discovering what to listen to next.
 
-[Installation](#installation) · [Features](#features) · [Quick Start](#quick-start) · [Tech Stack](#tech-stack)
+[Get started](#get-started) · [How to use it](#how-to-use-it) · [Engineering highlights](#engineering-highlights) · [Development](#development)
 
-</div>
+![easy-dlp's Music workspace with sidebar navigation and search](docs/screenshots/00-hero.png)
 
----
+## What you can do
 
-> Solo-built desktop application spanning UI, background job orchestration, metadata pipelines (iTunes API + ID3 tagging), and media post-processing (ffmpeg). Demonstrates threading/concurrency, API integration, persistent settings, and production-minded UX polish. Jump to [Tech Stack](#tech-stack) or [Project Structure](#project-structure).
+- **Save music with useful details.** Download MP3s with artist, album, cover art, and lyrics when available.
+- **Search or paste a link.** Look up music and videos, or import YouTube and Spotify links to review a list of tracks.
+- **Listen before downloading.** Play short previews, open the source in your browser, or choose a different YouTube match.
+- **Identify a song.** Use an audio file or YouTube link. On macOS, you can also listen through your microphone or capture computer audio.
+- **Explore your playlists.** Browse playlists from the macOS Music app or an exported playlist XML file, then find similar songs.
+- **Save video and artwork.** Choose MP4 video, MP3 audio, JPG thumbnails, or a combination.
 
-<br>
+Spotify links supply track information; easy-dlp finds matching recordings on YouTube. It does not download audio from Spotify. Apple Music integration uses the Music app on your Mac; an Apple Music subscription is not required to save local MP3s.
 
-<!-- Hero screenshot — drop your image at docs/screenshots/00-hero.png -->
-<p align="center">
-  <img src="docs/screenshots/00-hero.png" alt="easy-dlp main window" width="900" />
-</p>
+## Get started
 
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/00-hero.png</code> — full app window, light or dark theme</em></p>
-
-<br>
-
----
-
-## Table of contents
-
-| | |
-|---|---|
-| **Get started** | [Installation](#installation) · [Quick Start](#quick-start) · [Requirements](#requirements) · [Troubleshooting](#troubleshooting) |
-| **Learn the app** | [Features](#features) · [How to Use](#how-to-use) |
-| **For developers** | [Tech Stack](#tech-stack) · [Project Structure](#project-structure) · [Manual Install](#manual-install-developers) · [Distributing](#distributing-a-standalone-app) |
-| | [License](#license) |
-
----
-
-<br>
-
-# Installation
-
-> **Start here.** No terminal skills required — double-click to open.
-
-<br>
-
-## Fastest way (recommended)
+**One-time setup is required.** The included app icon is a launcher, not a self-contained installer. After installing the requirements, you can open the app by double-clicking.
 
 ### macOS
 
-1. Download the project ([ZIP](https://github.com/abl241/easy-dlp/archive/refs/heads/main.zip) or `git clone`) and unzip if needed.
-2. Install the two one-time requirements (copy/paste into Terminal):
+1. [Download the project ZIP](https://github.com/abl241/easy-dlp/archive/refs/heads/main.zip) and unzip it.
+2. Install [Homebrew](https://brew.sh/) if you do not already have it. Open **Terminal** and paste:
 
-   ```bash
+   ```sh
    brew install python@3.12 python-tk@3.12 ffmpeg
    ```
 
-   Don't have Homebrew yet? Install it from [brew.sh](https://brew.sh), then run the line above.
-3. Open the project folder in Finder and **double-click `easy-dlp`**.
+3. Open the downloaded folder and double-click **easy-dlp.app** (Finder may show it as **easy-dlp**). If that does not open, try **Open easy-dlp.command**.
+4. Wait for the first launch to install the app's supporting packages. Later launches reuse them.
 
-   | What you see | What to do |
-   |:---|:---|
-   | App opens | You're done |
-   | *"macOS cannot verify…"* | Right-click `easy-dlp` → **Open** → **Open** |
-   | Terminal setup messages | Wait — first launch installs packages, then the app opens |
+Keep the app icon inside the project folder. For a convenient shortcut, double-click **Add easy-dlp to Desktop.command**.
 
-4. *(Optional)* Double-click **`Add easy-dlp to Desktop.command`** once to put a shortcut on your Desktop / Dock.
+<details>
+<summary><strong>Windows setup</strong></summary>
 
-**Backup opener:** if the app icon won't launch, double-click **`Open easy-dlp.command`** instead.
+1. Install **Python 3.10 or newer** from [python.org](https://www.python.org/downloads/windows/). Enable **Add python.exe to PATH** and keep **tcl/tk and IDLE** selected.
+2. Install [FFmpeg](https://www.gyan.dev/ffmpeg/builds/). Extract the download and add its `bin` folder to your Windows **Path** environment variable. FFmpeg handles audio and video conversion.
+3. [Download the project ZIP](https://github.com/abl241/easy-dlp/archive/refs/heads/main.zip), unzip it, and double-click **Open easy-dlp.bat**.
+4. Wait for first-launch setup to finish.
 
-### Windows
+The Music app integration and live microphone/computer-audio identification are macOS features. File and YouTube-link identification are available on other platforms.
 
-1. Install [Python](https://www.python.org/downloads/windows/) — check **Add python.exe to PATH**, keep **tcl/tk and IDLE**.
-2. Install [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) and add its `bin` folder to PATH.
-3. Download / unzip the project.
-4. Double-click **`Open easy-dlp.bat`**.
+</details>
 
-First launch creates a private environment and installs dependencies, then opens the app.
+<details>
+<summary><strong>Linux setup (Ubuntu / Debian)</strong></summary>
 
-### Linux
+Install the requirements:
 
-```bash
+```sh
 sudo apt update
 sudo apt install python3 python3-venv python3-tk ffmpeg
+```
+
+Download and unzip the project. Open a terminal in that folder and run:
+
+```sh
 chmod +x run.sh
 ./run.sh
 ```
 
-<br>
-
-<details>
-<summary><strong>Need more detail? Step-by-step setup</strong></summary>
-
-<br>
-
-## What you'll need
-
-| Requirement | Why you need it |
-|:---|:---|
-| **Git** *(optional)* | Downloads the project from GitHub — or use Download ZIP |
-| **Python 3.10+** with **tkinter** | Runs the app and draws the GUI |
-| **ffmpeg** | Converts and muxes audio/video |
-
-On macOS / Linux, `run.sh` (and the double-click launchers) create a private Python environment and install all Python packages on first launch.
-
-<br>
-
-## Step 0 — Check for Python
-
-Open a terminal and run:
-
-```bash
-python3 --version
-```
-
-| Result | Next step |
-|:---|:---|
-| `Python 3.10` or higher | Continue to [Step 1](#step-1--download-the-project) |
-| `command not found` or version below 3.10 | Install Python first (see below) |
-
-<details>
-<summary><strong>🍎 macOS — install Python</strong></summary>
-
-<br>
-
-**Option A — Homebrew** *(recommended)*
-
-1. Install [Homebrew](https://brew.sh) if needed.
-2. Run:
-   ```bash
-   brew install python@3.12 python-tk@3.12
-   ```
-3. Verify:
-   ```bash
-   python3.12 --version
-   python3.12 -c "import tkinter; print('tkinter OK')"
-   ```
-
-**Option B — python.org**
-
-1. Download from [python.org/downloads/macos](https://www.python.org/downloads/macos/).
-2. Run the installer — leave all default components checked.
-3. Open a **new** Terminal and run `python3 --version`.
+Python 3.10 or newer is required. The launcher installs the remaining packages on first use.
 
 </details>
 
-<details>
-<summary><strong>🪟 Windows — install Python</strong></summary>
+### Your first download
 
-<br>
+1. Open **Music** in the sidebar.
+2. Type a song or artist, or paste a YouTube link, then choose **Search**.
+3. Use **▶** to hear a preview. Choose **Download** beside the recording you want.
+4. Find the finished MP3 in your **Music** folder. Change save locations in **Settings**.
 
-1. Download from [python.org/downloads/windows](https://www.python.org/downloads/windows/).
-2. On the first installer screen, **check "Add python.exe to PATH"**.
-3. Click **Customize installation** → ensure **tcl/tk and IDLE** is checked.
-4. Finish, then verify in Command Prompt:
-   ```bat
-   python --version
-   python -c "import tkinter; print('tkinter OK')"
-   ```
+Use content you own or have permission to download.
 
-</details>
+## How to use it
 
-<details>
-<summary><strong>🐧 Linux (Debian/Ubuntu) — install Python</strong></summary>
+### Music and imported playlists
 
-<br>
+The Music search box accepts searches, YouTube links, and Spotify links. For several links, choose **Import links**, paste one link per line from the same service, and choose **Import tracks**. Importing builds a review list; it does not immediately download everything.
 
-```bash
-sudo apt update
-sudo apt install python3 python3-venv python3-tk
-python3 --version
-python3 -c "import tkinter; print('tkinter OK')"
-```
+For Spotify imports, use **Match on YouTube** when prompted, review the matches, and then download. Use **Change** in a track's controls to pick a different recording. **Download all** starts a batch; **Downloads**, **Recent**, and the bottom activity panel show its progress.
 
-</details>
+**Previews:** Music search and imported tracks normally play a short Apple catalog sample. To check the actual YouTube recording, right-click (Control-click on Mac) **▶** and choose **Play selected YouTube source**. Catalog samples may differ from the selected upload. Use **Open link** to listen in your browser.
 
-<br>
+**On Mac:** enable **Add to Apple Music** to import completed songs into the Music app. The optional **Apple Music only** setting deletes the output-folder MP3 after import; keep Music's **Copy files to Music Media folder when adding to library** enabled if you use it.
 
-## Step 1 — Download the project
+### Identify a song
 
-**Git clone** *(recommended)*
+Open **Identify**, choose an audio file or **YouTube link**, and select **Identify song**. When a song is recognized, choose **Find similar** to explore related tracks.
 
-```bash
+On macOS, choose **Microphone** or **Computer audio**, then **Listen**. Recording lasts up to 20 seconds; **Stop & identify** finishes early and **Cancel** discards it. Computer audio needs macOS 13 or newer. macOS may ask for recording permissions when you first use these features.
+
+Temporary recordings are removed after recognition. Identification sends an audio fingerprint to Shazam through ShazamIO; it does not change your original file or its tags. Recognition and recommendations depend on an unofficial service and may not always return a result.
+
+### Find music from your playlists
+
+Open **Playlists** to browse playlists from the macOS Music app, or choose **Import playlist XML…** for an exported Music library/playlist file. Select a playlist, filter its tracks, and choose **Recommend for playlist**. Select a song to explore its related tracks instead.
+
+Playlist recommendations combine suggestions from up to eight songs spread across the playlist, remove existing songs and duplicates, and show which tracks inspired each suggestion. They are based on that playlist, not your complete listening history. Reading playlists does not modify them.
+
+Suggested songs offer previews and links. **Download…** takes you to Music to review a YouTube match before downloading the full recording. A disabled preview button means no catalog sample is available.
+
+### Save videos
+
+Open **Video**, search or paste a YouTube link, and choose your formats: **Audio (MP3)**, **Video (MP4)**, and/or **Thumbnail (JPG)**. Download an individual result or use **Download all**. Defaults save audio to **Music**, video to **Movies**, and thumbnails to **Pictures**; use **Output folders…** to change them.
+
+## Need help?
+
+- **The app will not open:** confirm Python includes tkinter and FFmpeg is installed. On macOS, use **Open easy-dlp.command** to see startup errors. In the project folder, `./run.sh --doctor` prints setup diagnostics.
+- **Updating from an older version:** get the latest project files, then run `./run.sh --update` from the project folder on macOS/Linux. On Windows, run `.venv\Scripts\python.exe -m pip install --upgrade -r requirements.txt`. Restart the app afterward.
+- **A song is the wrong version:** use **Change** to choose another YouTube match. Preview the selected source to check live, studio, or alternate recordings.
+- **YouTube asks you to sign in:** Settings accepts an optional Netscape-format cookies file. Cookies contain login information; keep them private and never commit or share them.
+- **Recording or Music access fails on Mac:** check **System Settings → Privacy & Security** for Microphone, Screen & System Audio Recording, or Automation access as appropriate. The launcher may appear as Python or Terminal. Restart after changing permissions.
+- **No artwork, lyrics, preview, or recommendations:** availability varies by song and service. Missing metadata does not mean your downloaded audio is broken.
+
+## Engineering highlights
+
+Built by **Alex Lee**, easy-dlp brings desktop UI, media processing, external service integration, and background scheduling together in one application. The implementation emphasizes a responsive interface and explicit control over matching, downloading, and recording.
+
+- **Responsive desktop UI:** CustomTkinter sidebar navigation retains page state; background jobs report progress through an event queue. Shared song tables, a collapsible activity panel, and paginated playlist views keep larger collections manageable.
+- **Concurrent media pipeline:** bounded matching and download workers hand completed audio to a separate tagging pool. Output filenames stay reserved through tagging/import to avoid collisions. Cancellation, rate-limit backoff, and per-stage timing are part of the job lifecycle.
+- **Metadata and matching:** artist, title, and duration comparisons help select catalog metadata and YouTube recordings. Mutagen writes ID3 tags and embedded artwork; cached catalog lookups reduce repeated requests.
+- **Native macOS integration:** AppleScript connects to the Music library; AVFoundation and ScreenCaptureKit support explicitly started, time-limited audio capture. Temporary preview and recognition files are cleaned up after use.
+- **Explainable recommendations:** playlist suggestions combine related-track results from sampled songs, exclude existing tracks, and retain source-song attribution. Local Music identifiers are kept separate from online catalog identifiers.
+- **Regression coverage:** tests cover job scheduling, imports, matching/discovery, audio capture, previews, playlist artwork, and native UI behavior. Offline scheduling benchmarks separate concurrency improvements from real network performance.
+
+**Stack:** Python 3.10+, CustomTkinter/Tk, yt-dlp, FFmpeg, Pillow, Mutagen, ShazamIO, SpotifyScraper, and macOS framework bindings.
+
+See [pipeline design and benchmark methodology](docs/PERFORMANCE.md) and [UI architecture notes](docs/UI_OVERHAUL.md) for implementation details. More work by Alex: [GitHub profile](https://github.com/abl241).
+
+## Development
+
+```sh
 git clone https://github.com/abl241/easy-dlp.git
 cd easy-dlp
-```
-
-**Or download ZIP**
-
-1. On GitHub → **Code** → **Download ZIP**
-2. Unzip the archive
-3. Open the folder in Finder / File Explorer
-
-<br>
-
-## Step 2 — Install ffmpeg
-
-<details>
-<summary><strong>🍎 macOS</strong></summary>
-
-```bash
-brew install ffmpeg
-```
-
-</details>
-
-<details>
-<summary><strong>🪟 Windows</strong></summary>
-
-1. Download from [gyan.dev/ffmpeg/builds](https://www.gyan.dev/ffmpeg/builds/) (*ffmpeg-release-essentials*).
-2. Add the `bin` folder to your **PATH**, or set `FFMPEG_BINARY` to the full path of `ffmpeg.exe`.
-
-</details>
-
-<details>
-<summary><strong>🐧 Linux</strong></summary>
-
-```bash
-sudo apt install ffmpeg
-```
-
-</details>
-
-<br>
-
-## Step 3 — Launch
-
-| System | Double-click this |
-|:---|:---|
-| **macOS** | `easy-dlp` *(the app icon)* — or `Open easy-dlp.command` |
-| **Windows** | `Open easy-dlp.bat` |
-| **Linux** | run `./run.sh` in a terminal |
-
-On first run the launcher automatically:
-
-1. Finds Python 3.10+ with tkinter
-2. Creates a `.venv` folder
-3. Installs `yt-dlp`, `customtkinter`, `Pillow`, `mutagen`, and `spotifyscraper`
-4. Opens the GUI
-
-<br>
-
-## Step 4 — Verify *(optional)*
-
-```bash
-./run.sh --doctor
-```
-
-| Command | What it does |
-|:---|:---|
-| Double-click `easy-dlp` / `Open easy-dlp.*` | Launch the app |
-| `./run.sh --update` | Upgrade dependencies |
-| `./run.sh --reset` | Rebuild `.venv` from scratch |
-| `./run.sh --help` | Show all commands |
-| `Add easy-dlp to Desktop.command` | Put a Desktop shortcut on macOS |
-
-</details>
-
-<br>
-
----
-
-<br>
-
-# Features
-
-> easy-dlp has three main tabs — **Music**, **Video**, and **Settings** — plus an activity dock (Active / Recent / Log) at the bottom of the window. Embed Thumbnail lives under **Settings → Legacy**.
-
-<br>
-
-## Video tab
-
-Search YouTube or paste URLs, pick your formats, and batch-download with thumbnails and progress tracking.
-
-<p align="center">
-  <img src="docs/screenshots/01-download-tab.png" alt="Video tab" width="900" />
-</p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/01-download-tab.png</code> — Video tab with search results and format checkboxes</em></p>
-
-<br>
-
-### Multi-format downloads
-
-Select any combination of **Audio (MP3)**, **Video (MP4)**, and **Thumbnail (JPG)** before downloading. A single search result can produce all three outputs in parallel — each format routes to its own output folder (`~/Music`, `~/Movies`, `~/Pictures` by default).
-
-### YouTube search
-
-Type any query in the search bar and hit Enter. Results load with **thumbnails**, **duration**, and **channel name** so you can preview before committing. Pasting a full YouTube URL resolves it directly without running a search.
-
-### Paste URLs
-
-Switch to the **Paste URLs** sub-tab to drop in video, playlist, or channel links — one per line. Playlists and channels automatically expand into individual videos in the results list, so you can cherry-pick or download everything at once.
-
-### Infinite scroll
-
-Search results paginate automatically. Scroll to the bottom of the list and more results load in the background — no "next page" button needed.
-
-### Smart filters
-
-Channels and playlists are always filtered out of search results (they aren't single downloadable items). An optional **Prefer audio** checkbox hides music videos and live streams when you only want listenable uploads.
-
-### Per-result & batch actions
-
-Every result row has its own **Download** button. Use **Download all** to grab the full list, or the **📁** button on any row to override the output folder for that one item.
-
-<p align="center">
-  <img src="docs/screenshots/02-download-result-row.png" alt="Download result row" width="700" />
-</p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/02-download-result-row.png</code> — single result row with thumbnail, metadata, and action buttons</em></p>
-
-<br>
-
----
-
-<br>
-
-## Music tab
-
-A purpose-built workflow for building a proper music library — not just raw downloads, but tagged MP3s with album art and lyrics.
-
-<p align="center">
-  <img src="docs/screenshots/03-music-tab.png" alt="Music tab" width="900" />
-</p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/03-music-tab.png</code> — Music tab with search, Prefer audio, Download lyrics, and Apple Music toggles</em></p>
-
-<br>
-
-### Tagged MP3 output
-
-Every music download produces an **MP3 with a clean, title-based filename** and full **ID3 metadata** — artist, album, year, genre, track number, and disc number — written automatically after download.
-
-### iTunes metadata enrichment
-
-After extracting artist and title from the YouTube upload, easy-dlp queries the **iTunes Search API** to find the best catalog match. It scores candidates by artist overlap, title similarity, and duration proximity to avoid mismatches (e.g. picking a live version over the studio track).
-
-### Embedded cover art
-
-High-resolution album artwork from iTunes is downloaded and **embedded directly into the MP3** — your music player sees the cover without a separate image file.
-
-<p align="center">
-  <img src="docs/screenshots/04-music-metadata.png" alt="Music metadata in file inspector" width="600" />
-</p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/04-music-metadata.png</code> — finished MP3 in Finder/Explorer or a music player showing tags + cover art</em></p>
-
-<br>
-
-### Synced lyrics
-
-Toggle **Download lyrics** to fetch synced `.lrc` lyrics and embed them in the MP3. Lyrics are looked up by artist + title after the track is identified.
-
-### Prefer audio
-
-When enabled, easy-dlp searches YouTube for an **official-audio upload** or **Topic channel** version instead of downloading a music video. It scores candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics. If no audio upload matches, it **falls back to a music video** rather than skipping the track.
-
-For tracks you pick yourself from Music search results, Prefer audio does **not** rematch away from your choice — the download starts on the URL you selected. Rematch still applies for auto-matched playlist imports (e.g. Spotify).
-
-### Audio-only search filter
-
-An optional filter hides music videos and live performances from Music search results, surfacing uploads that are already audio-first.
-
-### Alternate YouTube match
-
-Every search result and every matched Spotify/imported track has a **Change** button. Click it to run a fresh YouTube search for that song and pick a different upload — useful when the first match is a music video, a live version, or the wrong recording. The picker excludes the current video and lets you edit the search query before re-searching.
-
-### Add to Apple Music (macOS)
-
-Two optional checkboxes on the Music tab integrate with the **Music** app after tagging:
-
-| Checkbox | What it does |
-|:---|:---|
-| **Add to Apple Music** | Imports the finished MP3 into your Music library via AppleScript (falls back to the **Automatically Add to Music** folder). Your configured output folder keeps a copy. |
-| **Apple Music only** | Same import, then **deletes the local copy** from your output folder so the track lives only in Apple Music. Requires **Add to Apple Music**. Works best when Music → Settings → Files has **Copy files to Music Media folder when adding to library** enabled. |
-
-On first use, macOS may ask for permission to let easy-dlp control the Music app (System Settings → Privacy & Security → Automation).
-
-### Skip duplicates
-
-When enabled, easy-dlp checks your music output folder and (on macOS) your Apple Music library before downloading, and offers to skip tracks that already exist (by predicted filename or library metadata match).
-
-### Match quality (playlists)
-
-When matching a Spotify playlist (or any multi-track import), **Settings → Match quality** controls the speed vs. accuracy tradeoff:
-
-| Mode | Best for |
-|:---|:---|
-| **Fast (playlists)** | Large playlists — fewer YouTube lookups, lower rate-limit risk |
-| **Balanced** | Default — enriches top candidates and runs official-audio fallback |
-| **Accurate** | Obscure or ambiguous titles — more search results and verification |
-
-easy-dlp also backs off automatically when YouTube returns rate-limit errors during matching or download.
-
-### Review & verify matches
-
-After **Match on YouTube**, use **Review matches** in the results header to open a scrollable table of every source track and its YouTube pick — with **Open**, **Copy**, and **View** per row for quick manual spot-checking.
-
-Each matched track row also has **View match** (source vs. YouTube upload, link, Open/Copy/Change) and **Change** to pick a different upload.
-
-Failed matches show a red border; **Retry** on a row re-matches only that track. **Retry N failed** in the header retries all failed rows at once.
-
-### Search or paste
-
-Music mode has two input paths:
-
-| Sub-tab | Use for |
-|:---|:---|
-| **Search YouTube** | Find songs by name (same as Video tab, with music-specific filters) |
-| **Paste Link** | Paste a playlist, album, or track URL from an external platform |
-
-On **Paste Link**, pick a **Source** from the dropdown:
-
-| Source | What happens |
-|:---|:---|
-| **YouTube** | Playlists and channels expand into individual videos with direct download URLs |
-| **Spotify** | Public playlists, albums, and tracks resolve to a track list; you then match each song on YouTube |
-
-The source dropdown is designed to grow — Apple Music and other platforms can be added behind the same UI.
-
-### Spotify playlists (no Premium or API key required)
-
-Import a Spotify playlist or album, preview the track list, match on YouTube, and download tagged MP3s:
-
-1. Open **Music → Paste Link**
-2. Set **Source** to **Spotify**
-3. Paste a public playlist, album, or track URL (one per line)
-4. Click **Resolve & Pick** to load tracks from Spotify
-5. Click **Match on YouTube** to find a YouTube upload for each track
-6. Click **Download all**
-
-**Shortcut:** **Download all immediately** runs resolve → match → download in one flow.
-
-**Fallback:** If Spotify resolution fails, paste an `Artist - Title` list (one per line) in the text box below the URL field.
-
-Spotify-sourced **album name**, **track number**, and **disc number** are preserved through download and written to ID3 tags (overriding per-song iTunes guesses when needed).
-
-<br>
-
----
-
-<br>
-
-## Embed Thumbnail (legacy)
-
-Add or replace album art on MP3s you already have — single file or entire folders. Open **Settings → Legacy** to use this tool (it is no longer a top-level tab).
-
-<p align="center">
-  <img src="docs/screenshots/05-embed-tab.png" alt="Embed Thumbnail (Settings → Legacy)" width="900" />
-</p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/05-embed-tab.png</code> — Embed Thumbnail in folder mode with path pickers</em></p>
-
-<br>
-
-### Single-file mode
-
-Pick one audio file and one image. ffmpeg muxes the cover art into the MP3 in place — no re-encoding of the audio stream.
-
-### Batch folder mode
-
-Point at a folder of audio files and a folder of images. easy-dlp pairs `Song.mp3` with `Song.jpg` by filename and embeds covers across the whole batch in one click.
-
-<br>
-
----
-
-<br>
-
-## Job queue & live progress
-
-Downloads never freeze the UI. Search, matching, and downloads run on **separate background worker pools**, so you can keep searching and queueing tracks while other downloads finish.
-
-<p align="center">
-  <img src="docs/screenshots/06-job-panels.png" alt="Active and Recent job panels" width="900" />
-</p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/06-job-panels.png</code> — Active downloads with progress bars, Recent jobs, and log pane</em></p>
-
-<br>
-
-### Activity dock
-
-A single bottom strip switches between **Active**, **Recent**, and **Log**. Collapse it when idle to reclaim space; preferences persist across restarts. Active jobs show a **progress bar**, **cancel**, and live status. Parallel downloads are configurable (default: 2); search and matching use their own workers so they don't steal download slots.
-
-### Fast music search → download
-
-On the Music tab, picking a search result starts the download immediately:
-
-- Uses the URL you chose (no Prefer-audio rematch for user picks)
-- Skips a second yt-dlp metadata peek when search already provided title/artist
-- Applies iTunes tags, cover art, and lyrics **after** the file lands
-
-Result rows also render in small batches so the window stays clickable while a large result list fills in. Duplicate checks (folder / Apple Music) run off the UI thread.
-
-### Recent jobs
-
-Completed, failed, and cancelled jobs move here automatically. Failed rows are highlighted in red with the error on a separate line. Each failed or cancelled row has **Retry**; the header shows counts (e.g. `Recent (10) — 2 failed — 8 ok`) and **Retry all failed** when needed. Failed jobs sort to the top. Successful rows can open the output folder with **📁**. Retry only counts the latest attempt per format, so repeated failures don't stack duplicate Retry buttons.
-
-### Live log
-
-A scrollable log captures per-job output from yt-dlp and ffmpeg — useful for diagnosing failures without opening a terminal.
-
-- **Smart scroll** — scrolling up to read older lines no longer jumps you back to the bottom when new lines arrive; click **↓ Latest** to re-pin.
-- **Size** — cycle Normal / Large / X-Large for the embedded log (saved in settings).
-- **Pop out** — open the log in a separate, resizable window that shares the same stream.
-- Duplicate progress spam is suppressed — download status lives in the Active progress bar; the log focuses on milestones and errors.
-
-<br>
-
----
-
-<br>
-
-## Settings & appearance
-
-<p align="center">
-  <img src="docs/screenshots/07-settings-tab.png" alt="Settings tab" width="900" />
-</p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/07-settings-tab.png</code> — Settings tab showing output folders, theme, and scroll direction</em></p>
-
-<br>
-
-### Persistent output folders
-
-Set default directories for audio, video, thumbnails, and music. Every path is remembered between sessions.
-
-### Cookies file
-
-Point to a Netscape-format browser cookies export for age-restricted or private videos. See [`cookies.txt.example`](./cookies.txt.example) for format guidance.
-
-### Theme
-
-Choose **System**, **Light**, or **Dark**. System follows your OS appearance automatically.
-
-### Scroll direction
-
-On macOS, easy-dlp reads your system's Natural Scrolling preference. You can also force **Natural** or **Inverted** scroll behavior for the results panels.
-
-### Match quality
-
-Choose **Fast (playlists)**, **Balanced**, or **Accurate** for YouTube matching when importing multi-track sources (see [Match quality](#match-quality-playlists) under Music tab).
-
-### Legacy tools
-
-**Embed Thumbnail** (formerly its own tab) is under **Settings → Legacy** for attaching cover art to existing audio files. Prefer the Music tab for new downloads.
-
-### Settings location
-
-| OS | Path |
-|:---|:---|
-| macOS | `~/Library/Application Support/easy-dlp/settings.json` |
-| Linux | `~/.config/easy-dlp/settings.json` |
-| Windows | `%APPDATA%\easy-dlp\settings.json` |
-
-<br>
-
----
-
-<br>
-
-# Quick Start
-
-1. Double-click **`easy-dlp`** (Mac) or **`Open easy-dlp.bat`** (Windows) — or run `./run.sh`
-2. Pick a tab — **Music**, **Video**, or **Settings**
-3. **Video tab:** search YouTube or paste video/playlist URLs → pick formats → download
-4. **Music tab:** search YouTube, paste a YouTube link, or paste a **Spotify** playlist/album URL → match on YouTube → download tagged MP3s
-5. Click **Download** on individual rows, or **Download all**
-6. Watch progress in the activity dock (**Active** / **Recent** / **Log**)
-
-<br>
-
----
-
-<br>
-
-# How to Use
-
-## Video tab
-
-1. Check one or more formats: **Audio (MP3)**, **Video (MP4)**, **Thumbnail (JPG)**
-2. Search YouTube or paste URLs
-3. Review results → **Download** individually or **Download all**
-4. Files land in the folders set under **Settings**
-
-## Music tab
-
-### YouTube (search or paste)
-
-1. Toggle **Download lyrics** and **Prefer audio** as needed
-2. **Search YouTube** for a song, or **Paste Link** with Source set to **YouTube**
-3. Download — MP3s arrive with full tags, cover art, and optional lyrics
-
-### Spotify playlist or album
-
-1. Open **Paste Link** and set **Source** to **Spotify**
-2. Paste the Spotify URL → **Resolve & Pick**
-3. **Match on YouTube** → review results (**Review matches** for the full list; **View match** per row)
-4. **Download all** — files land in your music output folder with correct track numbers and album art
-
-## Cookies (optional)
-
-Export cookies from your browser (Netscape format) and set the path in **Settings → Cookies file** for restricted content.
-
-<br>
-
----
-
-<br>
-
-# Requirements
-
-| Component | Notes |
-|:---|:---|
-| Python 3.10+ | Must include `tkinter` and `venv` |
-| ffmpeg | On PATH or in a known install location |
-| yt-dlp | Installed automatically by `run.sh` |
-| customtkinter | Installed automatically by `run.sh` |
-| Pillow | Installed automatically by `run.sh` |
-| mutagen | Installed automatically by `run.sh` |
-| spotifyscraper | Installed automatically by `run.sh`; reads public Spotify pages (no API key) |
-
-<br>
-
----
-
-<br>
-
-# Troubleshooting
-
-| Problem | Fix |
-|:---|:---|
-| *"macOS cannot verify the developer"* | Right-click `easy-dlp` → **Open** → **Open** (one-time) |
-| App icon does nothing | Double-click `Open easy-dlp.command` instead — it shows errors in Terminal |
-| `Could not find a Python interpreter with tkinter` | Install `python-tk` / `python3-tk` — see [Installation](#installation) |
-| Downloads fail with ffmpeg errors | Run `ffmpeg -version`; install ffmpeg if missing |
-| `run.sh: Permission denied` | Double-click `Open easy-dlp.command` (it fixes permissions), or run `chmod +x run.sh` |
-| Blank window on launch | Python may lack tkinter — run `./run.sh --doctor` |
-| Age-restricted video fails | Add a cookies file in Settings |
-| Stale yt-dlp / broken downloads | Run `./run.sh --update` or `./run.sh --reset` |
-| Spotify playlist won't resolve | Playlist may be private; use the `Artist - Title` text fallback instead |
-| Song shows "no YouTube match" | Click **Retry** on the row or **Retry N failed** in the header; try **Match quality → Accurate** in Settings for obscure tracks |
-| Wrong track matched | **View match** to inspect the pick, then **Change** to search alternates |
-| Log scrolls away while reading | Scroll up freely; click **↓ Latest** in the log bar to jump back |
-| YouTube rate limiting during playlists | Use **Match quality → Fast**; wait a few minutes and retry failed rows |
-| Wrong track numbers on album | Re-download after updating — older builds wrote disc number into the wrong ID3 field |
-
-<br>
-
----
-
-<br>
-
-# Tech Stack
-
-| Layer | Technology | Role |
-|:---|:---|:---|
-| Language | Python 3.10+ | Application logic |
-| GUI | customtkinter (Tk) | Cross-platform desktop UI |
-| Downloader | yt-dlp | YouTube extraction and download |
-| Media | ffmpeg | Transcode, mux, embed thumbnails |
-| Metadata | mutagen | ID3 tag read/write for MP3s |
-| Images | Pillow | Thumbnail decode/resize for the UI |
-| Music data | iTunes Search API | Album art, track metadata, duration matching |
-| Playlist import | spotifyscraper | Public Spotify playlist/album metadata (no API key) |
-| Lyrics | LRCLIB | Synced lyric fetch |
-| Concurrency | Dual `ThreadPoolExecutor` pools + `queue` | Separate search/match workers vs download workers; non-blocking UI |
-| Rate limiting | Exponential backoff | Automatic wait/retry when YouTube throttles requests |
-| Settings | JSON on disk | Persistent, OS-appropriate config directory |
-| Packaging | Double-click launchers + `run.sh` | Finder/Explorer friendly; no PyInstaller required |
-
-<br>
-
-**Design highlights**
-
-| Area | What it demonstrates |
-|:---|:---|
-| Job queue with cancellation | Downloads, searches, and metadata enrichment as discrete job kinds; search/resolve/match never block download workers |
-| Fast music download path | User-picked search results skip rematch + pre-download peek; iTunes tagging runs after the file lands |
-| Responsive results list | Search rows render in small chunks; scroll sync avoids layout recursion freezes |
-| UI thread safety | Worker threads post updates through a `queue.Queue`; the main thread polls and renders; duplicate checks and URL resolve stay off the UI thread |
-| Fuzzy audio matching | Music mode scores YouTube candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics — with music-video fallback |
-| Platform registry | `sources/` module resolves YouTube and Spotify URLs into a unified `MusicTrack` model; new platforms plug in behind the Paste Link dropdown |
-| Spotify → YouTube pipeline | Two-phase jobs: `source_resolve` (metadata) then `source_match_all` (YouTube search per track) before the existing music download path |
-| Match quality presets | `fast` / `balanced` / `accurate` tune search depth, enrichment, and inter-track delays for large playlists |
-| Failure & retry UX | Failed downloads and matches surface clearly in Recent / track rows with per-item and batch retry |
-| Infinite scroll | Search pagination tracked per-tab with exhaustion flags — no duplicate fetches |
-| macOS scroll handling | Detects Tk version and system scroll preference to avoid trackpad snap-back bugs |
-
-<br>
-
----
-
-<br>
-
-# Project Structure
-
-```
-easy-dlp/
-├── easy-dlp.app/           # macOS double-click app (Finder)
-├── Open easy-dlp.command   # macOS backup launcher (shows Terminal)
-├── Open easy-dlp.bat       # Windows double-click launcher
-├── Add easy-dlp to Desktop.command  # macOS Desktop/Dock shortcut
-├── main.py                 # Convenience launcher (`python main.py`)
-├── run.sh                  # Setup + launch script (used by the apps above)
-├── pyproject.toml          # Package metadata and entry point
-├── requirements.txt        # Pinned-floor dependencies
-├── cookies.txt.example     # Template for browser cookie export
-├── scripts/
-│   └── check_playlist_matches.py  # CLI: evaluate YouTube match accuracy for a playlist
-├── docs/
-│   └── screenshots/        # README screenshots (see Features section)
-└── ytdlp_app/
-    ├── __main__.py         # `python -m ytdlp_app` entry
-    ├── gui.py              # customtkinter UI, tabs, scroll, job wiring
-    ├── jobs.py             # Dual job pools (search/match vs download) + cancel/progress
-    ├── downloader.py       # yt-dlp wrappers; fast-start music path (hints + deferred iTunes)
-    ├── search.py           # YouTube search, URL resolve, audio candidate scoring
-    ├── match_config.py     # Match quality presets (fast / balanced / accurate)
-    ├── rate_limit.py       # YouTube rate-limit detection and backoff
-    ├── sources/            # Platform registry (YouTube, Spotify, …)
-    │   ├── base.py         # MusicTrack model + text fallback parser
-    │   ├── youtube.py      # YouTube URL → MusicTrack
-    │   └── spotify.py      # Spotify playlist resolve via spotifyscraper
-    ├── embed.py            # ffmpeg thumbnail embedding (single + batch)
-    ├── music_postprocess.py# Cover art + lyrics write-back after download
-    ├── settings.py         # Persistent JSON settings store
-    ├── runtime.py          # ffmpeg discovery across PATH / Homebrew / bundled
-    ├── thumbcache.py       # Disk cache for search-result thumbnails
-    └── metadata/
-        ├── itunes.py       # iTunes Search API client + fuzzy track matching
-        ├── lyrics.py       # Synced lyric fetch
-        ├── parse.py        # YouTube title → artist/track parsing
-        └── tagger.py       # mutagen ID3 tagging
-```
-
-<br>
-
----
-
-<br>
-
-# Manual Install (developers)
-
-```bash
 python3.12 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 python main.py
 ```
 
-Or install as a package:
+On Windows, activate with `.venv\Scripts\activate`. Install FFmpeg separately. Using `requirements.txt` also installs the JavaScript runtime/helper packages used by yt-dlp.
 
-```bash
-pip install -e .
-easy-dlp
+Run the suite with a graphical desktop session (native UI tests create windows):
+
+```sh
+python -m unittest discover -s tests
 ```
 
-<br>
+Run the offline pipeline regressions and simulated scheduling benchmark:
 
----
-
-<br>
-
-# Distributing a Standalone App
-
-For most people, **no extra build step is needed** — ship the repo as-is and tell users to double-click `easy-dlp` (Mac) or `Open easy-dlp.bat` (Windows).
-
-To bundle a fully self-contained binary with [PyInstaller](https://pyinstaller.org/) (optional, for sharing without Python installed):
-
-```bash
-.venv/bin/pip install pyinstaller
-.venv/bin/pyinstaller --windowed --onefile --name easy-dlp main.py
-# macOS: dist/easy-dlp.app   Windows: dist/easy-dlp.exe
+```sh
+python -m unittest discover -s tests -p 'test_*performance.py' -v
+python scripts/benchmark_pipeline.py
 ```
 
-1. The app checks `/opt/homebrew/bin/ffmpeg` and other common paths automatically.
-2. For a fully self-contained bundle, place an `ffmpeg` binary next to the executable.
-3. Unsigned macOS builds may require right-click → **Open** on first launch.
+Main code areas: `gui.py` and `ui.py` for the desktop shell; `jobs.py` and `downloader.py` for background work; `metadata/` for tagging; `discovery.py`, `recommendations.py`, and `playlists.py` for discovery; `capture.py` and `preview.py` for audio input/playback. These live under [`ytdlp_app/`](ytdlp_app/).
 
-<br>
+## Project status and license
 
----
+Personal-use project under active development. macOS is the primary development environment; Windows and Linux launchers are included, but native Apple integrations are macOS-only. The app relies on third-party services whose availability can change.
 
-<br>
-
-# License
-
-Personal-use project. [yt-dlp](https://github.com/yt-dlp/yt-dlp) is licensed under the [Unlicense](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE); ffmpeg under LGPL/GPL depending on build.
+Dependencies retain their own licenses: [yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE) uses the Unlicense; FFmpeg licensing depends on the build. See each dependency for its terms.
