@@ -11,6 +11,10 @@ dependencies = [
     "Pillow>=10.0.0",
     "mutagen>=1.47.0",
     "spotifyscraper>=3.0",
+    "shazamio==0.8.1",
+    'pyobjc-framework-AVFoundation>=10.0; sys_platform == "darwin"',
+    'pyobjc-framework-ScreenCaptureKit>=10.0; sys_platform == "darwin"',
+
 ]
 
 [project.scripts]

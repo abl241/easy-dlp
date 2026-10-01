@@ -31,6 +31,7 @@ _DEFAULTS: dict[str, Any] = {
     "audio_dir": str(Path.home() / "Music"),
     "video_dir": str(Path.home() / "Movies"),
     "thumb_dir": str(Path.home() / "Pictures"),
+    "playlist_artwork_dir": "",
 
     # Embed-tab paths
     "embed_video_dir": "",

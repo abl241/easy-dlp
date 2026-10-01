@@ -26,5 +26,9 @@
 	<true/>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Identify a song from a short microphone recording when you choose Listen.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Identify music playing on your computer when you choose Listen.</string>
 </dict>
 </plist>

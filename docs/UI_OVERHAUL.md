@@ -10,11 +10,14 @@ media processing pipeline. There are no new dependencies.
 - Persistent Music, Video, and Settings pages with a sidebar. Downloads and
   Recent open the activity drawer without replacing the current results.
 - Always-visible search accepts either text or a single link. Music links route
-  through the existing YouTube/Spotify resolver. Bulk links and artist/title
-  lists remain available in the import disclosure.
+  through the existing YouTube/Spotify resolver. Bulk links use a preview-first import disclosure; track-list pasting has been removed.
+  Pasted links change the main action to Preview link. Invalid lines and mixed-service
+  batches receive inline errors, and exact duplicate links are collapsed.
 - Music-inspired gray surfaces, icon-derived blue/violet accents, consistent spacing,
   clearer headings, and quieter row actions. Music artwork reserves square
   space; video artwork stays widescreen. Image aspect ratios are preserved.
+- Compact rows use alternating neutral surfaces and an overflow menu for secondary
+  actions. Search fields have a focus ring; empty or busy actions are disabled.
 - Music rows emphasize artist and duration. Full titles and source metadata
   are available in delayed hover tooltips.
 - Compact activity summary with an active count and progress for the oldest
@@ -39,7 +42,7 @@ Run native integration tests in a graphical desktop session:
 ```
 
 Tests use temporary settings and mocked job submission, with no media downloads.
-Coverage includes URL routing, preservation of hidden track-list drafts, repeat
+Coverage includes URL routing, ignoring legacy track-list drafts, repeat
 submission, retained results, bulk import, keyboard focus, placeholder behavior,
 empty states, both themes, minimum window sizing, image proportions, reduced
 motion, and stable workspace height during progress updates.
@@ -61,3 +64,7 @@ virtualization; this change preserves the existing three-row chunking.
 A real music search was also checked in the native preview: results, artwork,
 and the persistent query field displayed successfully. Downloads were not run
 as part of the visual check.
+
+The import flow is links → preview → Find matches (Spotify) → review → download.
+Preview never starts downloads. Bulk drafts survive single-link previews; successful
+imports close the input disclosure, while failed imports keep it open for correction.
