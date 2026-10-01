@@ -905,6 +905,9 @@ class App(ctk.CTk):
             header, text="Download all", width=150, height=32, command=self._music_primary_action,
         )
         self._music_download_all_btn.pack(side="right", padx=2)
+        from .playlist_destination import PlaylistDestination
+        self.music_playlist_destination = PlaylistDestination(header, self)
+        self.music_playlist_destination.pack(side="right", padx=8)
 
         self._music_results_body = ctk.CTkFrame(res_outer, fg_color="transparent")
         self._music_results_body.grid(row=1, column=0, sticky="nsew", padx=6, pady=0)
@@ -1033,14 +1036,88 @@ class App(ctk.CTk):
         if not items:
             return
         menu = tk.Menu(self, tearoff=0)
-        for label, command in items:
-            menu.add_command(label=label, command=command)
+        def populate(target, entries):
+            for label, command in entries:
+                if isinstance(command, list):
+                    child = tk.Menu(target, tearoff=0)
+                    populate(child, command)
+                    target.add_cascade(label=label, menu=child)
+                else:
+                    target.add_command(label=label, command=command, state='disabled' if command is None else 'normal')
+        populate(menu, items)
         try:
             x = button.winfo_rootx()
             y = button.winfo_rooty() + button.winfo_height()
             menu.tk_popup(x, y)
         finally:
             menu.grab_release()
+
+    def _show_playlist_download_menu(self, button, items, download):
+        if sys.platform != 'darwin':
+            self._show_popup_menu(button, items)
+            return
+        from . import playlists
+        cached = getattr(self, '_download_playlists', None)
+        if cached is None:
+            self._set_status('Loading Apple Music playlists…')
+            events = queue.Queue()
+            def load():
+                try:
+                    events.put((playlists.list_playlists(threading.Event()), None))
+                except Exception as error:
+                    events.put((None, str(error)))
+            threading.Thread(target=load, daemon=True, name='playlist-menu').start()
+            def poll():
+                try:
+                    result, error = events.get_nowait()
+                except queue.Empty:
+                    self.after(100, poll)
+                    return
+                if error:
+                    self._set_status(error)
+                    if button.winfo_exists():
+                        self._show_popup_menu(button, items)
+                    return
+                self._download_playlists = result
+                if button.winfo_exists():
+                    self._show_playlist_download_menu(button, items, download)
+            self.after(100, poll)
+            return
+        targets = [(p.display_name, lambda target=p: download(target)) for p in cached
+                   if not p.special_kind and not p.is_smart and not p.id.startswith('xml:')]
+        def refresh():
+            self._download_playlists = None
+            self._show_playlist_download_menu(button, items, download)
+        targets = targets or [('No writable playlists found', None)]
+        targets.append(('Refresh playlists…', refresh))
+        self._show_popup_menu(button, [('Download to playlist', targets), *items])
+
+    def _download_to_playlist(self, playlist, *, result=None, track=None):
+        out_dir = self.settings.get('music_dir') or _pick_folder()
+        if not out_dir:
+            return None
+        self.settings.set('music_dir', out_dir)
+        if track is not None and not track.youtube_url:
+            from dataclasses import replace
+            track = replace(track, match_status=MATCH_PENDING)
+        label = track.display_title(60) if track is not None else result.display_title(60)
+        job = self._enqueue_music_download(
+            track.youtube_url if track is not None else result.url,
+            f'Music → {playlist.name}: {label}', out_dir=out_dir,
+            cookies=self.settings.get('cookies_path') or None, result=result, track=track,
+            playlist_id=playlist.id)
+        self._set_status(f'Queued for {playlist.name}: {label}')
+        return job
+
+    def _download_all_to_playlist(self, playlist):
+        if self._music_showing_tracks:
+            for track in tuple(self.music_tracks):
+                if self._download_to_playlist(playlist, track=track) is None:
+                    break
+        else:
+            for result in tuple(self.music_results):
+                if result.kind == 'track' and self._download_to_playlist(playlist, result=result) is None:
+                    break
 
     def _show_download_more_menu(self) -> None:
         self._show_popup_menu(self._download_more_btn, [
@@ -1061,7 +1138,7 @@ class App(ctk.CTk):
             items.append(("Review matches", self._music_review_matches))
         items.append(("Download to folder…", lambda: self._music_download_all(override=True)))
         items.append(("Import links…", self._music_new_link))
-        self._show_popup_menu(self._music_more_btn, items)
+        self._show_playlist_download_menu(self._music_more_btn, items, self._download_all_to_playlist)
 
     def _sync_results_scroll_frame_height(self, body, frame) -> None:
         """Resize a CTkScrollableFrame viewport to fill its grid body."""
@@ -1925,7 +2002,11 @@ class App(ctk.CTk):
         result: SearchResult | None = None,
         track: MusicTrack | None = None,
         user_picked: bool = False,
-    ) -> None:
+        playlist_id: str | None = None,
+    ) -> Job:
+        if playlist_id is None:
+            selected = self.music_playlist_destination.selected()
+            playlist_id = selected.id if selected else ""
         params = self._music_job_params()
         params["verbose"] = bool(self.settings.get("verbose"))
         if track is not None:
@@ -1952,7 +2033,15 @@ class App(ctk.CTk):
             if user_picked:
                 # User picked this result — don't rematch away from their choice.
                 params["skip_prefer_audio_rematch"] = True
-        self.jobs.enqueue(
+        if track is not None and not track.youtube_url and (track.source == 'shazam' or playlist_id):
+            params.update(self._music_search_job_params())
+            params['match_before_download'] = True
+            params['tracks'] = [track.to_dict()]
+            params['skip_existing'] = bool(self.music_skip_duplicates_var.get()) and not playlist_id
+        if playlist_id:
+            params['add_to_apple_music'] = True
+            params['apple_music_playlist_id'] = playlist_id
+        return self.jobs.enqueue(
             kind="music",
             label=label,
             url=url,
@@ -2025,11 +2114,13 @@ class App(ctk.CTk):
         force: bool = False,
         user_picked: bool = False,
     ) -> bool:
-        if force or not self.music_skip_duplicates_var.get():
+        selected = self.music_playlist_destination.selected()
+        playlist_id = selected.id if selected else ''
+        if force or selected or not self.music_skip_duplicates_var.get():
             self._enqueue_music_download(
                 url, label,
                 out_dir=out_dir, cookies=cookies, result=result, track=track,
-                user_picked=user_picked,
+                user_picked=user_picked, playlist_id=playlist_id,
             )
             return True
 
@@ -2050,7 +2141,7 @@ class App(ctk.CTk):
                         url, label,
                         out_dir=out_dir, cookies=cookies,
                         result=result, track=track,
-                        user_picked=user_picked,
+                        user_picked=user_picked, playlist_id=playlist_id,
                     )
 
                 self.after(0, on_err)
@@ -2068,7 +2159,7 @@ class App(ctk.CTk):
                 self._enqueue_music_download(
                     url, label,
                     out_dir=out_dir, cookies=cookies, result=result, track=track,
-                    user_picked=user_picked,
+                    user_picked=user_picked, playlist_id=playlist_id,
                 )
                 self._set_status(f"Queued: {label}")
 
@@ -2112,11 +2203,13 @@ class App(ctk.CTk):
         # duplicate / library work off-thread so the UI stays responsive.
         self._maybe_cap_playlist_parallel(len(items))
 
-        if not self.music_skip_duplicates_var.get():
+        selected = self.music_playlist_destination.selected()
+        playlist_id = selected.id if selected else ''
+        if selected or not self.music_skip_duplicates_var.get():
             for url, label, result, track in items:
                 self._enqueue_music_download(
                     url, label,
-                    out_dir=out_dir, cookies=cookies, result=result, track=track,
+                    out_dir=out_dir, cookies=cookies, result=result, track=track, playlist_id=playlist_id,
                 )
             return
 
@@ -2505,21 +2598,36 @@ class App(ctk.CTk):
                     verbose=verbose,
                 )
 
-    def _discovery_download(self, track):
-        """Use the existing match-review and download options for catalog songs."""
-        self.tabs.set('Music')
-        self.music_tracks = [MusicTrack(
+    def _discovery_download(self, track, playlist=None):
+        """Queue discovery independently of the Music page's current results."""
+        if playlist is None and self.tabs.get() == "Playlists":
+            playlist = self.playlists_page.playlist_destination.selected()
+        key = track.apple_id or track.key or (track.artist, track.title)
+        if playlist is not None:
+            key = (key, playlist.id)
+        if not hasattr(self, '_discovery_jobs'):
+            self._discovery_jobs = {}
+        existing = self._discovery_jobs.get(key)
+        if existing is not None and existing.state not in (FAILED, CANCELLED):
+            return existing
+        out_dir = self.settings.get('music_dir')
+        if not out_dir:
+            out_dir = _pick_folder()
+            if not out_dir:
+                return None
+            self.settings.set('music_dir', out_dir)
+        song = MusicTrack(
             artist=track.artist, title=track.title, album=track.album,
             duration_s=round(track.duration_s) if track.duration_s else None,
             cover_url=track.artwork_url or None, track_number=track.track_number,
-            disc_number=track.disc_number, source='shazam', source_url=track.apple_url or track.url)]
-        self.music_results = []
-        self._music_showing_tracks = True
-        self._music_search_query = None
-        self._music_auto_download = False
-        self._music_render_results()
-        self._music_match_all()
-        self._set_status('Finding a YouTube source. Review its match, then use Download or Download to… in Music.')
+            disc_number=track.disc_number, source='shazam', source_url=track.apple_url or track.url)
+        job = self._enqueue_music_download(
+            '', f'Music: {song.display_title(60)}', out_dir=out_dir,
+            cookies=self.settings.get('cookies_path') or None, track=song,
+            playlist_id=playlist.id if playlist else '')
+        self._discovery_jobs[key] = job
+        self._set_status(f'Queued: {song.display_title(60)}. Follow progress in Active downloads.')
+        return job
 
     def _music_download_one_track(self, track: MusicTrack, *, override: bool) -> None:
         if not track.is_downloadable() or not track.youtube_url:
@@ -5105,7 +5213,7 @@ class _MusicTrackRow:
             )),
         ]
         anchor = self._more_btn or self.frame
-        self.app._show_popup_menu(anchor, items)
+        self.app._show_playlist_download_menu(anchor, items, lambda p: self.app._download_to_playlist(p, track=self.track))
 
     def _kick_off_thumb_fetch(self, url: str) -> None:
         def _on_loaded(img) -> None:
@@ -5212,7 +5320,7 @@ class _ResultRow:
             menu_items.insert(0, ("Choose another match…", lambda: app._music_toggle_alternate(result_index)))
         self._folder_btn = ctk.CTkButton(
             btn_col, text="⋯", width=32, height=32,
-            command=lambda: app._show_popup_menu(self._folder_btn, menu_items),
+            command=lambda: app._show_playlist_download_menu(self._folder_btn, menu_items, lambda p: app._download_to_playlist(p, result=self.result)) if mode == "music" and result.kind == "track" else app._show_popup_menu(self._folder_btn, menu_items),
             fg_color="transparent", text_color=MUTED, hover_color=HOVER,
         )
         Tooltip(self._folder_btn, "More actions")

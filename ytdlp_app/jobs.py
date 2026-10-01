@@ -371,6 +371,30 @@ class JobQueue:
         elif job.kind == "music":
             from . import search as se
 
+            if params.get('match_before_download'):
+                from .sources.base import MusicTrack
+                source = MusicTrack.from_dict(params['tracks'][0])
+                if params.get('skip_existing'):
+                    from .music_duplicates import check_music_duplicate
+                    import sys
+                    log('Checking for an existing copy…')
+                    exists, display, _ = check_music_duplicate(
+                        params['output_dir'], track=source, check_apple_music=sys.platform == 'darwin')
+                    if job.cancel_event.is_set():
+                        raise _Cancelled()
+                    if exists:
+                        job.result = {'skipped_duplicate': True}
+                        job.label = f'Already in library/folder: {display}'
+                        return None
+                with self._timed_stage(job, 'matching'):
+                    self._match_tracks(job, log)
+                if job.cancel_event.is_set():
+                    raise _Cancelled()
+                matched = job.result[0] if job.result else None
+                if matched is None or not matched.is_downloadable():
+                    raise ValueError('No reliable YouTube match found. Retry or choose a source in Music search.')
+                params['url'] = matched.youtube_url
+                params['skip_prefer_audio_rematch'] = True
             url = params["url"]
             # User-picked search results already chose a URL — rematching
             # only delays the download. Spotify/auto matches still rematch
@@ -733,8 +757,13 @@ class JobQueue:
                         progress=log,
                         cancel_event=job.cancel_event,
                         remove_source=bool(params.get("apple_music_only")),
+                        **({"playlist_id": params["apple_music_playlist_id"]} if params.get("apple_music_playlist_id") else {}),
                     )
                 if not imp.success:
+                    if params.get("apple_music_playlist_id"):
+                        job.state = FAILED
+                        job.error = f"Downloaded file saved, but playlist import failed: {imp.message}"
+                        break
                     log(
                         f"WARN: Apple Music import failed"
                         f" — {imp.message}",

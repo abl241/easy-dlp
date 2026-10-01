@@ -46,6 +46,8 @@ class IdentifyPage(ctk.CTkFrame):
         self.identify_btn.pack(side="left")
         self.similar_btn = ctk.CTkButton(actions, text="Find similar", command=self._similar, state="disabled")
         self.similar_btn.pack(side="left", padx=8)
+        from .discovery_widgets import bind_identify_menu
+        bind_identify_menu(self.similar_btn, app, lambda: self._identify_similar(self._track) if self._track else None)
         self.cancel_btn = ctk.CTkButton(actions, text="Cancel", command=self._cancel_work, state="disabled", width=80)
         self.cancel_btn.pack(side="left")
         self.status = ctk.CTkLabel(self, text="Choose audio to get started.", anchor="w", wraplength=750, justify="left")
@@ -57,7 +59,7 @@ class IdentifyPage(ctk.CTkFrame):
         self.results = ctk.CTkScrollableFrame(self)
         self.results.pack(fill="both", expand=True, pady=8)
         from .discovery_widgets import DiscoveryRenderer
-        self._renderer = DiscoveryRenderer(self.results, app, self._similar_track)
+        self._renderer = DiscoveryRenderer(self.results, app, self._similar_track, self._identify_similar)
         self._poll_id = self.after(100, self._poll)
 
     def _mode_changed(self, mode):
@@ -123,7 +125,13 @@ class IdentifyPage(ctk.CTkFrame):
         if self._busy:
             return
         self._related_seed = track
-        self._start("similar", lambda: discovery.find_similar(track.key, self._cancel))
+        from .recommendations import similar_with_fallback
+        self._start("identify_similar", lambda: similar_with_fallback(track, self._cancel, cookies=self.app.settings.get("cookies_path") or None, progress=lambda msg: self._events.put(("progress", msg, None))))
+
+    def _identify_similar(self, track):
+        from .recommendations import identify_then_similar
+        cookies = self.app.settings.get('cookies_path') or None
+        self._start('identify_similar', lambda: identify_then_similar(track, self._cancel, cookies=cookies))
 
     def _start(self, kind, work):
         if self._busy:
@@ -135,7 +143,7 @@ class IdentifyPage(ctk.CTkFrame):
         for widget in (self.identify_btn, self.similar_btn, self.browse, self.mode, self.entry):
             widget.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
-        self.status.configure(text="Recognizing audio…" if kind == "identify" else "Finding related songs…")
+        self.status.configure(text="Recognizing audio…" if kind in ("identify", "identify_similar") else "Finding related songs…")
         def run():
             try:
                 result = work()
@@ -150,7 +158,7 @@ class IdentifyPage(ctk.CTkFrame):
 
     def _row(self, parent, track):
         from .discovery_widgets import DiscoveryRow
-        return DiscoveryRow(parent, self.app, track, self._similar_track)
+        return DiscoveryRow(parent, self.app, track, self._similar_track, on_identify=self._identify_similar)
 
     def _poll(self):
         if self._closed:
@@ -190,6 +198,8 @@ class IdentifyPage(ctk.CTkFrame):
                 detail = f" Apple Music ID: {result.apple_id}." if result.apple_id else ""
                 self.status.configure(text="Song recognized." + detail + " Check the release before using its metadata.")
             else:
+                if kind == "identify_similar":
+                    self._related_seed, result = result
                 self._renderer.cancel()
                 for child in self.results.winfo_children():
                     child.destroy()

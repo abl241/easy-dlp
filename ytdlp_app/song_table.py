@@ -28,15 +28,16 @@ def header(parent, action_width=110):
     return frame
 
 
-def cells(frame, track, callback):
+def cells(frame, track, callback=None):
     result = {}
     values = (('Song', track.title), ('Artist', track.artist or '—'),
               ('Album', track.album or '—'), ('Time', time_text(track.duration_s)))
     for column, (name, value) in enumerate(values, 1):
         label = ctk.CTkLabel(frame, text=value, width=1, anchor='w', text_color=TEXT,
-                             cursor='hand2', font=ctk.CTkFont(size=13))
+                             cursor='hand2' if callback else '', font=ctk.CTkFont(size=13))
         label.grid(row=0, column=column, sticky='ew', padx=5, pady=8)
-        label.bind('<Button-1>', lambda event: callback())
+        if callback:
+            label.bind('<Button-1>', lambda event: callback())
         Tooltip(label, value)
         result[name] = label
     return result

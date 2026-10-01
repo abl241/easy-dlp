@@ -43,6 +43,7 @@ def import_to_library(
     progress: ProgressFn = lambda msg: None,
     cancel_event: threading.Event | None = None,
     remove_source: bool = False,
+    playlist_id: str = "",
 ) -> ImportResult:
     """Add a tagged audio file to the Music app library."""
     if not is_supported():
@@ -56,6 +57,12 @@ def import_to_library(
         return ImportResult(success=False, message=f"file not found: {path}")
 
     progress("[music] adding to Apple Music…")
+    if playlist_id:
+        # A library-only fallback cannot satisfy an explicit playlist target.
+        result = _import_via_playlist(src, playlist_id)
+        if result.success:
+            progress("[music] added to selected Apple Music playlist")
+        return result
     result = _import_via_applescript(src)
     if not result.success:
         progress(
@@ -251,3 +258,41 @@ def _import_via_auto_add_folder(
         return ImportResult(success=False, message=str(e))
     progress("[music] copied to Automatically Add to Music folder")
     return ImportResult(success=True)
+
+
+_PLAYLIST_IMPORT_SCRIPT = '''on run argv
+    set sourceFile to (POSIX file (item 1 of argv)) as alias
+    set targetID to item 2 of argv
+    tell application "Music"
+        set targets to (every user playlist whose persistent ID is targetID)
+        if (count of targets) is not 1 then error "Selected playlist no longer exists. Refresh playlists."
+        set destination to item 1 of targets
+        if smart of destination then error "Smart playlists cannot accept songs manually."
+        -- Resolve the library track first; direct file-to-playlist add can fail.
+        set importedTracks to (every file track of library playlist 1 whose location is sourceFile)
+        if (count of importedTracks) is 0 then
+            set importedTracks to add sourceFile
+            if importedTracks is missing value then error "Music did not import the audio file."
+            if class of importedTracks is not list then set importedTracks to {importedTracks}
+        end if
+        repeat with importedTrack in importedTracks
+            set trackID to persistent ID of importedTrack
+            if not (exists (first track of destination whose persistent ID is trackID)) then
+                duplicate importedTrack to destination
+            end if
+            if not (exists (first track of destination whose persistent ID is trackID)) then
+                error "Music imported the song, but did not add it to the selected playlist."
+            end if
+        end repeat
+        return "Added to " & (name of destination)
+    end tell
+end run'''
+
+
+def _import_via_playlist(path, playlist_id):
+    try:
+        proc = subprocess.run(['osascript', '-e', _PLAYLIST_IMPORT_SCRIPT,
+                               str(path.resolve()), playlist_id], capture_output=True, text=True, timeout=120)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return ImportResult(False, str(error))
+    return ImportResult(proc.returncode == 0, (proc.stderr or proc.stdout or '').strip())

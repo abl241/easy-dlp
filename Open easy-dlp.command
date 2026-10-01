@@ -10,7 +10,13 @@ launch_tty="$(tty 2>/dev/null || true)"
 echo "Starting easy-dlp..."
 if ./run.sh; then
   if [[ "${TERM_PROGRAM:-}" == Apple_Terminal && "$launch_tty" == /dev/ttys* ]]; then
-    nohup osascript scripts/close-launch-terminal.applescript "$launch_tty" >/dev/null 2>&1 &
+    # Detach from this terminal's process group so the closer does not count
+    # itself as a busy terminal job. Keep all three streams off the tty.
+    .venv/bin/python - "$PWD/scripts/close-launch-terminal.applescript" "$launch_tty" <<'PYTHON'
+import subprocess, sys
+subprocess.Popen(['osascript', sys.argv[1], sys.argv[2]], start_new_session=True,
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PYTHON
   fi
   exit 0
 else

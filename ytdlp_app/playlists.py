@@ -26,6 +26,7 @@ class Playlist:
     name: str
     tracks: tuple[PlaylistTrack, ...] | None = None
     special_kind: str = ""
+    is_smart: bool = False
 
     @property
     def display_name(self):
@@ -36,7 +37,7 @@ _MUSIC_SCRIPT = r'''
 function run(argv) {
     const music = Application('Music');
     if (!argv.length) {
-        return JSON.stringify(music.userPlaylists().map(p => ({id: p.persistentID(), name: p.name(), special_kind: p.specialKind()})));
+        return JSON.stringify(music.userPlaylists().map(p => ({id: p.persistentID(), name: p.name(), special_kind: p.specialKind(), is_smart: p.smart()})));
     }
     const matches = music.userPlaylists.whose({persistentID: argv[0]})();
     if (!matches.length) throw new Error('Playlist no longer exists. Refresh Apple Music.');
@@ -86,7 +87,7 @@ def _music_read(args, cancel):
 
 
 def list_playlists(cancel):
-    return [Playlist(str(row['id']), str(row['name']), special_kind=str(row.get('special_kind') or '') if row.get('special_kind') != 'none' else '') for row in _music_read([], cancel)]
+    return [Playlist(str(row['id']), str(row['name']), special_kind=str(row.get('special_kind') or '') if row.get('special_kind') != 'none' else '', is_smart=bool(row.get('is_smart'))) for row in _music_read([], cancel)]
 
 
 def load_tracks(playlist, cancel):

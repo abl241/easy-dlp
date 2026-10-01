@@ -142,3 +142,53 @@ def for_playlist(tracks, cancel, progress=lambda _: None, max_seeds=8):
         if len(suggestions) == 40:
             break
     return RecommendationResult(tuple(suggestions), count, matched, tuple(skipped), tuple(f'{t.artist} — {t.title}' for t in seeds))
+
+
+def identify_then_similar(track, cancel, *, cookies=None):
+    """Recognize real audio before asking for that recording's related songs."""
+    from pathlib import Path
+    import tempfile
+    discovery.check_cancel(cancel)
+    local = getattr(track, 'audio_path', '')
+    sample = getattr(track, 'preview_url', '')
+    if local and Path(local).is_file():
+        seed = discovery.identify(local, is_link=False, cookies=cookies, cancel=cancel)
+    elif sample:
+        # Shazam/Apple samples are temporary inputs, never saved to the library.
+        with tempfile.TemporaryDirectory(prefix='easy-dlp-identify-sample-') as folder:
+            path = Path(folder) / 'sample.m4a'
+            with urlopen(Request(sample, headers={'User-Agent': 'Mozilla/5.0'}), timeout=15) as response, path.open('wb') as output:
+                total = 0
+                while chunk := response.read(65536):
+                    discovery.check_cancel(cancel)
+                    total += len(chunk)
+                    if total > 10 * 1024 * 1024:
+                        raise ValueError('Audio sample is too large. Identify a local audio file instead.')
+                    output.write(chunk)
+            seed = discovery.identify(str(path), is_link=False, cookies=cookies, cancel=cancel)
+    else:
+        from .search import find_youtube_match_for_track
+        match = find_youtube_match_for_track(track.artist, track.title, track.duration_s or None,
+                                             cookies_path=cookies, cancel_event=cancel)
+        discovery.check_cancel(cancel)
+        if match is None:
+            raise ValueError('No audio source found. Use Identify with a local file or microphone.')
+        seed = discovery.identify(match.url, is_link=True, cookies=cookies, cancel=cancel)
+    discovery.check_cancel(cancel)
+    return seed, discovery.find_similar(seed.key, cancel)
+
+
+
+def similar_with_fallback(track, cancel, *, cookies=None, progress=lambda _: None):
+    try:
+        if isinstance(track, discovery.DiscoveredTrack):
+            result = track, discovery.find_similar(track.key, cancel)
+        else:
+            result = for_song(track, cancel)
+        if result[1]:
+            return result
+    except Exception:
+        discovery.check_cancel(cancel)
+    discovery.check_cancel(cancel)
+    progress('No similar-song match. Identifying audio, then trying again…')
+    return identify_then_similar(track, cancel, cookies=cookies)

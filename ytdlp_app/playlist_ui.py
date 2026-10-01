@@ -7,7 +7,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from . import discovery, playlists, recommendations, thumbcache
-from .discovery_widgets import DiscoveryRenderer
+from .discovery_widgets import DiscoveryRenderer, bind_identify_menu
 from .preview import _safe_error
 from .ui import MUTED, TEXT, HOVER, Tooltip, ArtworkLabel
 from .playlist_artwork import ArtworkLoader, SIZE
@@ -61,6 +61,9 @@ class PlaylistsPage(ctk.CTkFrame):
         self.cancel_btn = ctk.CTkButton(choose, text='Cancel', width=70, state='disabled', command=self._cancel_work)
         self.recommend_btn = ctk.CTkButton(choose, text='Recommend', width=110, command=self._recommend, state='disabled')
         self.recommend_btn.pack(side='right', padx=(8, 0))
+        from .playlist_destination import PlaylistDestination
+        self.playlist_destination = PlaylistDestination(choose, app)
+        self.playlist_destination.pack(side='right', padx=8)
         self.status = ctk.CTkLabel(self, text='Load playlists from the macOS Music app, or import an exported XML playlist.',
                                   anchor='w', wraplength=800, justify='left')
         self.status.configure(height=20, font=ctk.CTkFont(size=12), text_color=MUTED)
@@ -85,7 +88,7 @@ class PlaylistsPage(ctk.CTkFrame):
         song_table.header(recommendations_tab, action_width=0)
         self.results = ctk.CTkScrollableFrame(recommendations_tab)
         self.results.pack(fill='both', expand=True)
-        self._renderer = DiscoveryRenderer(self.results, app, self._similar)
+        self._renderer = DiscoveryRenderer(self.results, app, self._similar, self._identify_similar)
         self._poll_id = self.after(100, self._poll)
 
     def _toggle_tools(self):
@@ -161,20 +164,28 @@ class PlaylistsPage(ctk.CTkFrame):
         playlist = self._playlists[label]
         self._start('tracks', lambda: (label, self._track_cache[label] if label in self._track_cache else playlists.load_tracks(playlist, self._cancel)), f'Loading {playlist.display_name}…')
 
-    def _song(self, track, row=None):
-        if self._busy:
-            return
+    def _select_song_row(self, row):
         if self._selected_row is not None and self._selected_row.winfo_exists():
             self._selected_row.configure(fg_color='transparent')
         self._selected_row = row
         if row is not None:
             row.configure(fg_color=HOVER)
-        self._start('similar', lambda: recommendations.for_song(track, self._cancel), f'Finding similar to {track.artist} — {track.title}…')
+
+    def _song(self, track, row=None):
+        if self._busy:
+            return
+        self._select_song_row(row)
+        self._start('similar', lambda: recommendations.similar_with_fallback(track, self._cancel, cookies=self.app.settings.get('cookies_path') or None, progress=lambda msg: self._events.put(('progress', msg, None))), f'Finding similar to {track.artist} — {track.title}…')
+
+    def _identify_similar(self, track):
+        cookies = self.app.settings.get('cookies_path') or None
+        self._start('similar', lambda: recommendations.identify_then_similar(track, self._cancel, cookies=cookies),
+                    f'Identifying audio for {track.artist} — {track.title}, then finding similar…')
 
     def _similar(self, track):
         if self._busy:
             return
-        self._start('similar', lambda: (track, discovery.find_similar(track.key, self._cancel)), f'Finding similar to {track.artist} — {track.title}…')
+        self._start('similar', lambda: recommendations.similar_with_fallback(track, self._cancel, cookies=self.app.settings.get('cookies_path') or None, progress=lambda msg: self._events.put(('progress', msg, None))), f'Finding similar to {track.artist} — {track.title}…')
 
     def _recommend(self):
         if not self._tracks:
@@ -234,7 +245,7 @@ class PlaylistsPage(ctk.CTkFrame):
             image = ctk.CTkImage(light_image=placeholder, dark_image=placeholder, size=SIZE)
             artwork = ArtworkLabel(row, text='', image=image, width=SIZE[0], height=SIZE[1])
             artwork.grid(row=0, column=0, padx=(6, 8), pady=4)
-            artwork.bind('<Button-1>', lambda event, t=track, r=row: self._song(t, r))
+            artwork.bind('<Button-1>', lambda event, r=row: self._select_song_row(r))
             generation = self._art_generation
             self._art_serial += 1
             token = self._art_serial
@@ -244,8 +255,10 @@ class PlaylistsPage(ctk.CTkFrame):
             # finalizers must run on Tk's thread, including during shutdown.
             self._artwork.load(track, self._artwork_folders(), generation,
                                lambda loaded, g=generation, key=token: events.put((g, key, loaded)))
-            ctk.CTkButton(row, text='Find similar', width=100, command=lambda t=track, r=row: self._song(t, r)).grid(row=0, column=5, padx=5, pady=6)
-            row.cells = song_table.cells(row, track, lambda t=track, r=row: self._song(t, r))
+            row.similar_btn = ctk.CTkButton(row, text='Find similar', width=100, command=lambda t=track, r=row: self._song(t, r))
+            row.similar_btn.grid(row=0, column=5, padx=5, pady=6)
+            bind_identify_menu(row.similar_btn, self.app, lambda t=track: self._identify_similar(t))
+            row.cells = song_table.cells(row, track, lambda r=row: self._select_song_row(r))
         self._shown = end
         if end < len(self._filtered_tracks):
             self._more = ctk.CTkButton(self.songs, text=f'Show more ({end}/{len(self._filtered_tracks)})', command=self._show_more)
@@ -284,6 +297,9 @@ class PlaylistsPage(ctk.CTkFrame):
             elif error:
                 self.status.configure(text=error)
             elif kind == 'library':
+                if any(not p.id.startswith('xml:') for p in result):
+                    self.playlist_destination.set_playlists(result)
+                    self.app.music_playlist_destination.set_playlists(result)
                 self._playlists = {f'{index + 1}. {p.display_name}': p for index, p in enumerate(result)}
                 self._art_generation = self._artwork.new_view()
                 self._art_targets.clear()
@@ -314,7 +330,7 @@ class PlaylistsPage(ctk.CTkFrame):
                 self._shown = 0
                 self._filter_songs()
                 self.views.set('Songs')
-                self.status.configure(text=f'{len(self._tracks)} songs in {self._selected_name}. Click a song to find similar, or recommend for the playlist.')
+                self.status.configure(text=f'{len(self._tracks)} songs in {self._selected_name}. Use Find similar, or recommend for the playlist.')
             elif kind == 'similar':
                 seed, related = result
                 self._clear(self.results)

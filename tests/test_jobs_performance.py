@@ -47,6 +47,54 @@ class QueueTests(unittest.TestCase):
     def tag(path, **kwargs):
         return music_postprocess.PostprocessResult(final_path=path)
 
+    def test_discovery_matches_then_downloads_in_one_job(self):
+        track = MusicTrack('Artist', 'Song', album='Record', source='shazam')
+        def match(job, log):
+            job.result = [replace(track, youtube_url='matched', match_status=MATCH_MATCHED)]
+        with patch.object(self.queue, '_match_tracks', side_effect=match), \
+             patch.object(jobs.dl, 'download_music', side_effect=self.download) as download, \
+             patch.object(jobs.mp, 'process_track', side_effect=self.tag), \
+             patch.object(search, 'find_preferred_audio_url') as rematch:
+            job = self.enqueue('Song', match_before_download=True, tracks=[track.to_dict()], prefer_audio=True)
+            self.wait_for(lambda: self.finished(job))
+        self.assertEqual(job.state, jobs.DONE)
+        self.assertEqual(download.call_args.args[0], ['matched'])
+        rematch.assert_not_called()
+
+    def test_discovery_missing_match_fails_without_downloading(self):
+        track = MusicTrack('Artist', 'Song', source='shazam')
+        def match(job, log):
+            job.result = [track]
+        with patch.object(self.queue, '_match_tracks', side_effect=match), \
+             patch.object(jobs.dl, 'download_music') as download:
+            job = self.enqueue('Song', match_before_download=True, tracks=[track.to_dict()])
+            self.wait_for(lambda: self.finished(job))
+        self.assertEqual(job.state, jobs.FAILED)
+        self.assertIn('No reliable YouTube match', job.error)
+        download.assert_not_called()
+
+    def test_discovery_existing_song_skips_matching_and_download(self):
+        track = MusicTrack('Artist', 'Song', source='shazam')
+        with patch('ytdlp_app.music_duplicates.check_music_duplicate', return_value=(True, 'Song', 'library')), \
+             patch.object(self.queue, '_match_tracks') as match, \
+             patch.object(jobs.dl, 'download_music') as download:
+            job = self.enqueue('Song', match_before_download=True, skip_existing=True, tracks=[track.to_dict()])
+            self.wait_for(lambda: self.finished(job))
+        self.assertEqual(job.state, jobs.DONE)
+        self.assertTrue(job.result['skipped_duplicate'])
+        match.assert_not_called()
+        download.assert_not_called()
+
+    def test_playlist_import_failure_marks_job_failed_and_passes_target(self):
+        with patch.object(jobs.dl, 'download_music', side_effect=self.download), \
+             patch.object(jobs.mp, 'process_track', side_effect=self.tag), \
+             patch.object(jobs.am, 'import_to_library', return_value=jobs.am.ImportResult(False, 'playlist removed')) as imp:
+            job = self.enqueue('Song', add_to_apple_music=True, apple_music_playlist_id='TARGET')
+            self.wait_for(lambda: self.finished(job))
+        self.assertEqual(job.state, jobs.FAILED)
+        self.assertEqual(imp.call_args.kwargs['playlist_id'], 'TARGET')
+        self.assertIn('Downloaded file saved', job.error)
+
     def test_tagging_does_not_occupy_download_worker(self):
         tagging = threading.Event()
         second_download = threading.Event()

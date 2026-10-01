@@ -387,7 +387,7 @@ class DesktopUI(unittest.TestCase):
             rows[0].preview_btn.invoke()
             play.assert_called_once_with(suggestion.preview_url, direct=True)
             rows[0].preview_btn.invoke()
-        with patch('ytdlp_app.discovery.find_similar', return_value=[]) as related:
+        with patch('ytdlp_app.discovery.find_similar', return_value=[seed]) as related:
             rows[0].similar_btn.invoke()
             self.pump(.3)
             self.assertEqual(related.call_args.args[0], '34')
@@ -487,24 +487,39 @@ class DesktopUI(unittest.TestCase):
         page.song_filter.set('')
         self.pump(.2)
 
-    def test_discovery_download_preserves_metadata_and_requires_review(self):
+    def test_discovery_download_queues_without_navigation_or_replacing_results(self):
         from ytdlp_app.discovery import DiscoveredTrack
         from ytdlp_app.discovery_widgets import DiscoveryRow
+        from ytdlp_app.jobs import QUEUED, FAILED
         app = self.app
+        app.tabs.set('Playlists')
+        old_tracks = app.music_tracks
+        app.settings.set('music_dir', self.temp.name)
+        app._discovery_jobs = {}
         track = DiscoveredTrack('123', 'A song', 'An artist', '', album='Record', duration_s=201,
                                 genres=('Pop',), release_date='2020-01-01', track_number=3)
         row = DiscoveryRow(app.playlists_page.results, app, track, lambda t: None)
-        self.assertEqual(row.cells['Album'].cget('text'), 'Record')
-        self.assertEqual(row.preview_btn.cget('text'), '▶')
-        self.assertEqual(row.preview_btn.cget('state'), 'disabled')
-        with patch.object(app.jobs, 'enqueue', return_value=MagicMock(id='test')) as enqueue:
+        job = Job(999, 'music', 'Test', {}, state=QUEUED)
+        with patch.object(app.jobs, 'enqueue', return_value=job) as enqueue:
             row.download_btn.invoke()
-        self.assertEqual(app.tabs.get(), 'Music')
-        self.assertEqual(app.music_tracks[0].album, 'Record')
-        self.assertEqual(app.music_tracks[0].track_number, 3)
-        self.assertFalse(app._music_auto_download)
-        self.assertEqual(enqueue.call_args.kwargs['kind'], 'source_match_all')
+            self.assertIs(app._discovery_download(track), job)
+            enqueue.assert_called_once()
+        params = enqueue.call_args.kwargs
+        self.assertEqual(app.tabs.get(), 'Playlists')
+        self.assertIs(app.music_tracks, old_tracks)
+        self.assertEqual(params['source_album'], 'Record')
+        self.assertEqual(params['source_track_number'], 3)
+        self.assertTrue(params['match_before_download'])
+        self.assertEqual(params['kind'], 'music')
+        self.assertEqual(row.download_btn.cget('text'), 'Queued')
+        job.state = FAILED
+        self.pump(.3)
+        self.assertEqual(row.download_btn.cget('text'), 'Retry download')
+        with patch.object(app.jobs, 'enqueue', return_value=Job(1000, 'music', 'Retry', {})) as enqueue:
+            row.download_btn.invoke()
+            enqueue.assert_called_once()
         row.destroy()
+        app._discovery_jobs = {}
 
     def test_discovery_artwork_resizes_and_incremental_render_cancels(self):
         from ytdlp_app.discovery import DiscoveredTrack
@@ -529,6 +544,102 @@ class DesktopUI(unittest.TestCase):
         self.pump(.1)
         self.assertEqual(len(page.results.winfo_children()), 2)
         page._clear(page.results)
+
+    def test_similar_requires_button_and_open_links_live_in_more_menu(self):
+        from ytdlp_app.playlists import PlaylistTrack
+        from ytdlp_app.discovery import DiscoveredTrack
+        from ytdlp_app.discovery_widgets import DiscoveryRow
+        app, page = self.app, self.app.playlists_page
+        app.tabs.set('Playlists')
+        page.views.set('Songs')
+        page._tracks = [PlaylistTrack('1', 'Song', 'Artist')]
+        page.song_filter.set('')
+        page._filter_songs()
+        self.pump(.1)
+        row = page.songs.winfo_children()[0]
+        with patch.object(page, '_start') as start:
+            row.cells['Song']._label.event_generate('<Button-1>')
+            self.pump(.05)
+            start.assert_not_called()
+            row.similar_btn.invoke()
+            start.assert_called_once()
+        with patch.object(app, '_show_popup_menu') as menu, patch.object(page, '_identify_similar') as identify:
+            row.similar_btn._text_label.event_generate('<Button-3>')
+            self.pump(.05)
+            items = menu.call_args.args[1]
+            self.assertEqual(items[0][0], 'Identify audio, then find similar')
+            items[0][1]()
+            identify.assert_called_once_with(page._tracks[0])
+        track = DiscoveredTrack('22', 'Song', 'Artist', 'https://www.shazam.com/track/22', apple_url='https://music.apple.com/us/song/22')
+        similar = MagicMock()
+        result = DiscoveryRow(page.results, app, track, similar)
+        result.cells['Song']._label.event_generate('<Button-1>')
+        similar.assert_not_called()
+        app._download_playlists = []
+        with patch.object(app, '_show_popup_menu') as menu, patch.object(app, '_open_media_link') as open_link:
+            result.more_btn.invoke()
+            items = menu.call_args.args[1]
+            self.assertEqual([label for label, _ in items], ['Download to playlist', 'Open in Apple Music', 'Open in Shazam', 'Open in YouTube'])
+            items[-1][1]()
+            self.assertIn('youtube.com/results?search_query=', open_link.call_args.args[0])
+        result.destroy()
+
+    def test_playlist_download_menu_filters_targets_and_preserves_destination(self):
+        from ytdlp_app.playlists import Playlist
+        from ytdlp_app.discovery import DiscoveredTrack
+        app = self.app
+        app.tabs.set('Playlists')
+        target = Playlist('USER-ID', 'music')
+        app._download_playlists = [Playlist('LIB', 'Music', special_kind='Music'), target,
+                                  Playlist('SMART', 'Smart', is_smart=True), Playlist('xml:0', 'Imported')]
+        app.settings.set('music_dir', self.temp.name)
+        app._discovery_jobs = {}
+        song = DiscoveredTrack('55', 'Song', 'Artist', '')
+        with patch.object(app, '_show_popup_menu') as popup:
+            app._show_playlist_download_menu(app.playlists_page.tools_btn, [], lambda p: app._discovery_download(song, p))
+        submenu = popup.call_args.args[1][0]
+        self.assertEqual(submenu[0], 'Download to playlist')
+        self.assertEqual([name for name, _ in submenu[1]], ['music', 'Refresh playlists…'])
+        with patch.object(app.jobs, 'enqueue', return_value=Job(888, 'music', 'Song', {})) as enqueue:
+            submenu[1][0][1]()
+        self.assertEqual(enqueue.call_args.kwargs['apple_music_playlist_id'], 'USER-ID')
+        self.assertTrue(enqueue.call_args.kwargs['add_to_apple_music'])
+        self.assertFalse(enqueue.call_args.kwargs['skip_existing'])
+        self.assertEqual(app.tabs.get(), 'Playlists')
+        with patch.object(app.jobs, 'enqueue', return_value=Job(889, 'music', 'Song', {})) as enqueue:
+            app._download_to_playlist(target, result=self.result())
+        self.assertEqual(enqueue.call_args.kwargs['apple_music_playlist_id'], 'USER-ID')
+        self.assertTrue(enqueue.call_args.kwargs['add_to_apple_music'])
+        app._discovery_jobs = {}
+
+    def test_destination_dropdowns_default_none_and_apply_independently(self):
+        from ytdlp_app.playlists import Playlist
+        from ytdlp_app.discovery import DiscoveredTrack
+        app = self.app
+        music = app.music_playlist_destination
+        discovery = app.playlists_page.playlist_destination
+        music.menu.set('None')
+        discovery.menu.set('None')
+        target = Playlist('TARGET', 'My playlist')
+        music.set_playlists([target])
+        discovery.set_playlists([target])
+        self.assertIsNone(music.selected())
+        self.assertIsNone(discovery.selected())
+        music.menu.set(next(iter(music.targets)))
+        app.settings.set('music_dir', self.temp.name)
+        with patch.object(app.jobs, 'enqueue', return_value=Job(900, 'music', 'Song', {})) as enqueue:
+            app._music_download_one(self.result(), override=False)
+        self.assertEqual(enqueue.call_args.kwargs['apple_music_playlist_id'], 'TARGET')
+        self.assertIsNone(discovery.selected())
+        music.menu.set('None')
+        discovery.menu.set(next(iter(discovery.targets)))
+        app.tabs.set('Playlists')
+        app._discovery_jobs = {}
+        with patch.object(app.jobs, 'enqueue', return_value=Job(901, 'music', 'Song', {})) as enqueue:
+            app._discovery_download(DiscoveredTrack('dest', 'Song', 'Artist', ''))
+        self.assertEqual(enqueue.call_args.kwargs['apple_music_playlist_id'], 'TARGET')
+        discovery.menu.set('None')
+        app._discovery_jobs = {}
 
 
 if __name__ == '__main__':

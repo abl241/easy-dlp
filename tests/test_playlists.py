@@ -80,3 +80,41 @@ class PlaylistTests(unittest.TestCase):
         with patch.object(playlists, '_music_read', return_value=[]) as read:
             playlists.load_tracks(user, threading.Event())
         self.assertEqual(read.call_args.args[0], ['USER'])
+
+    def test_identify_similar_uses_local_audio_and_recognized_key(self):
+        with tempfile.NamedTemporaryFile() as audio:
+            track = playlists.PlaylistTrack('1', 'Bad title', 'Unknown', audio_path=audio.name)
+            recognized = DiscoveredTrack('987', 'Real title', 'Artist', '')
+            with patch.object(recommendations.discovery, 'identify', return_value=recognized) as identify, \
+                 patch.object(recommendations.discovery, 'find_similar', return_value=[]) as similar, \
+                 patch('ytdlp_app.search.find_youtube_match_for_track') as search:
+                seed, _ = recommendations.identify_then_similar(track, threading.Event())
+            self.assertEqual(seed, recognized)
+            self.assertEqual(identify.call_args.args[0], audio.name)
+            self.assertFalse(identify.call_args.kwargs['is_link'])
+            self.assertEqual(similar.call_args.args[0], '987')
+            search.assert_not_called()
+
+    def test_identify_similar_missing_source_does_not_guess_a_seed(self):
+        track = playlists.PlaylistTrack('1', 'Bad title', 'Unknown')
+        with patch('ytdlp_app.search.find_youtube_match_for_track', return_value=None), \
+             patch.object(recommendations.discovery, 'find_similar') as similar:
+            with self.assertRaisesRegex(ValueError, 'No audio source'):
+                recommendations.identify_then_similar(track, threading.Event())
+        similar.assert_not_called()
+
+    def test_similar_falls_back_on_failure_or_empty_but_not_cancel(self):
+        song = playlists.PlaylistTrack('1', 'Song', 'Artist')
+        seed = DiscoveredTrack('22', 'Recognized', 'Artist', '')
+        for value in (ValueError('no catalog match'), (seed, [])):
+            with patch.object(recommendations, 'for_song', side_effect=value if isinstance(value, Exception) else None, return_value=value), \
+                 patch.object(recommendations, 'identify_then_similar', return_value=(seed, [seed])) as identify:
+                self.assertEqual(recommendations.similar_with_fallback(song, threading.Event()), (seed, [seed]))
+                identify.assert_called_once()
+        cancel = threading.Event()
+        cancel.set()
+        with patch.object(recommendations, 'for_song', side_effect=RuntimeError('Cancelled')), \
+             patch.object(recommendations, 'identify_then_similar') as identify:
+            with self.assertRaisesRegex(RuntimeError, 'Cancelled'):
+                recommendations.similar_with_fallback(song, cancel)
+            identify.assert_not_called()
