@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 import tempfile
@@ -134,10 +137,20 @@ def identify(source, *, is_link, cookies, cancel):
     return enrich_tracks([parse_track(raw["track"])], cancel)[0]
 
 
+_SIMILAR_CACHE = OrderedDict()
+_SIMILAR_LOCK = threading.Lock()
+_SIMILAR_TTL = 300
+
+
 def find_similar(key, cancel):
     check_cancel(cancel)
     if not key or not key.isdigit():
         raise ValueError("This result has no usable Shazam ID.")
+    with _SIMILAR_LOCK:
+        cached = _SIMILAR_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < _SIMILAR_TTL:
+            _SIMILAR_CACHE.move_to_end(key)
+            return list(cached[1])
     raw = asyncio.run(_request("related", key))
     check_cancel(cancel)
     result = []
@@ -147,7 +160,14 @@ def find_similar(key, cancel):
         if track.key and track.key not in seen:
             seen.add(track.key)
             result.append(track)
-    return enrich_tracks(result, cancel)
+    result = enrich_tracks(result, cancel)
+    if result:
+        with _SIMILAR_LOCK:
+            _SIMILAR_CACHE[key] = (time.monotonic(), tuple(result))
+            _SIMILAR_CACHE.move_to_end(key)
+            while len(_SIMILAR_CACHE) > 128:
+                _SIMILAR_CACHE.popitem(last=False)
+    return result
 
 
 def enrich_tracks(tracks, cancel):

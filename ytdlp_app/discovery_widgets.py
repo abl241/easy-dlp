@@ -2,7 +2,7 @@
 import queue
 from urllib.parse import urlparse
 import customtkinter as ctk
-from .ui import MUTED, TEXT, HOVER, ArtworkLabel, Tooltip
+from .ui import MUTED, TEXT, HOVER, ArtworkLabel, Tooltip, artwork_image
 from . import song_table, thumbcache
 
 
@@ -69,9 +69,44 @@ class DiscoveryRow(ctk.CTkFrame):
             self._cover_after = self.after(100, self._poll_cover)
             return
         if image is not None:
+            image = artwork_image(image, (48, 48))
             self._image.configure(light_image=image, dark_image=image)
 
     def destroy(self):
         if self._cover_after is not None:
             self.after_cancel(self._cover_after)
         super().destroy()
+
+
+class DiscoveryRenderer:
+    """Yield to Tk between small batches, and discard superseded renders."""
+    def __init__(self, parent, app, on_similar):
+        self.parent, self.app, self.on_similar = parent, app, on_similar
+        self._after = None
+        self._pending = iter(())
+
+    def cancel(self):
+        if self._after is not None:
+            self.parent.after_cancel(self._after)
+            self._after = None
+        self._pending = iter(())
+        self._done = None
+
+    def show(self, items, done=None):
+        self.cancel()
+        self._pending = iter(items)
+        self._done = done
+        self._batch()
+
+    def _batch(self):
+        self._after = None
+        for _ in range(2):
+            item = next(self._pending, None)
+            if item is None:
+                if self._done:
+                    self._done()
+                    self._done = None
+                return
+            track, because = item
+            DiscoveryRow(self.parent, self.app, track, self.on_similar, because=because)
+        self._after = self.parent.after(10, self._batch)

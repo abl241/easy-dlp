@@ -506,6 +506,30 @@ class DesktopUI(unittest.TestCase):
         self.assertEqual(enqueue.call_args.kwargs['kind'], 'source_match_all')
         row.destroy()
 
+    def test_discovery_artwork_resizes_and_incremental_render_cancels(self):
+        from ytdlp_app.discovery import DiscoveredTrack
+        from ytdlp_app.discovery_widgets import DiscoveryRow, DiscoveryRenderer
+        page = self.app.playlists_page
+        page._clear(page.results)
+        track = DiscoveredTrack('1', 'Song', 'Artist', '', artwork_url='https://example.test/cover')
+        callbacks = []
+        with patch('ytdlp_app.thumbcache.load', side_effect=lambda url, callback: callbacks.append(callback)):
+            row = DiscoveryRow(page.results, self.app, track, lambda _: None)
+        callbacks[0](Image.new('RGB', (100, 100), 'red'))
+        self.pump(.2)
+        self.assertEqual(row._image.cget('light_image').size, (48, 48))
+        self.assertEqual(row._image.cget('dark_image').size, (48, 48))
+        self.assertEqual(row._image.cget('light_image').getpixel((24, 24)), (255, 0, 0))
+        row.destroy()
+        renderer = DiscoveryRenderer(page.results, self.app, lambda _: None)
+        plain = DiscoveredTrack('2', 'Other', 'Artist', '')
+        renderer.show([(plain, '')] * 20)
+        self.assertEqual(len(page.results.winfo_children()), 2)
+        renderer.cancel()
+        self.pump(.1)
+        self.assertEqual(len(page.results.winfo_children()), 2)
+        page._clear(page.results)
+
 
 if __name__ == '__main__':
     unittest.main()

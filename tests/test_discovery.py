@@ -7,6 +7,24 @@ from ytdlp_app.discovery import identify, find_similar, parse_track
 
 
 class DiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        from ytdlp_app.discovery import _SIMILAR_CACHE
+        _SIMILAR_CACHE.clear()
+
+    def test_similar_cache_reuses_results_and_expires(self):
+        raw = {'tracks': [{'key': '2', 'title': 'Song'}]}
+        with patch('ytdlp_app.discovery._request', new=AsyncMock(return_value=raw)) as request, \
+             patch('ytdlp_app.discovery.time.monotonic', return_value=10) as clock:
+            first = find_similar('1', threading.Event())
+            second = find_similar('1', threading.Event())
+            self.assertEqual(first, second)
+            self.assertEqual(request.call_count, 1)
+            first.clear()
+            self.assertEqual(len(find_similar('1', threading.Event())), 1)
+            clock.return_value = 311
+            find_similar('1', threading.Event())
+            self.assertEqual(request.call_count, 2)
+
     def test_apple_metadata_excludes_subscription_link(self):
         track = parse_track({'key': '12', 'hub': {'options': [{'actions': [
             {'uri': 'https://music.apple.com/subscribe'},

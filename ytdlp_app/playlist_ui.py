@@ -7,7 +7,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from . import discovery, playlists, recommendations, thumbcache
-from .discovery_widgets import DiscoveryRow
+from .discovery_widgets import DiscoveryRenderer
 from .preview import _safe_error
 from .ui import MUTED, TEXT, HOVER, Tooltip, ArtworkLabel
 from .playlist_artwork import ArtworkLoader, SIZE
@@ -42,11 +42,8 @@ class PlaylistsPage(ctk.CTkFrame):
         self._more = None
         self._selected_row = None
         self.pack(fill='both', expand=True)
-        ctk.CTkLabel(self, text='Playlists', font=ctk.CTkFont(size=28, weight='bold')).pack(anchor='w')
-        ctk.CTkLabel(self, text='Browse your Music playlists and discover songs to try next. Your library stays unchanged.',
-                     anchor='w', text_color=MUTED, wraplength=750, justify='left').pack(fill='x', pady=(0, 10))
         toolbar = ctk.CTkFrame(self, fg_color='transparent')
-        toolbar.pack(fill='x')
+        self._tools_toolbar = toolbar
         self.load_btn = ctk.CTkButton(toolbar, text='Load Apple Music', command=self._load_library)
         self.load_btn.pack(side='left', padx=(0, 6))
         self.import_btn = ctk.CTkButton(toolbar, text='Import playlist XML…', command=self._import)
@@ -54,28 +51,33 @@ class PlaylistsPage(ctk.CTkFrame):
         self.artwork_btn = ctk.CTkButton(toolbar, text='Artwork folder…', width=130, command=self._choose_artwork_folder)
         self.artwork_btn.pack(side='left', padx=4)
         Tooltip(self.artwork_btn, 'Use matching JPG/PNG files from a local folder. Embedded song artwork and adjacent covers are also checked.')
-        self.cancel_btn = ctk.CTkButton(toolbar, text='Cancel', width=80, state='disabled', command=self._cancel_work)
-        self.cancel_btn.pack(side='right')
         choose = ctk.CTkFrame(self, fg_color='transparent')
-        choose.pack(fill='x', pady=10)
+        choose.pack(fill='x', pady=(0, 4))
         self.playlist_title = ctk.CTkLabel(choose, text='Choose a playlist in the sidebar', anchor='w', font=ctk.CTkFont(size=16, weight='bold'))
         self.playlist_title.pack(side='left', fill='x', expand=True)
-        self.recommend_btn = ctk.CTkButton(choose, text='Recommend for playlist', command=self._recommend, state='disabled')
+        self.tools_btn = ctk.CTkButton(choose, text='⋯', width=34, command=self._toggle_tools)
+        self.tools_btn.pack(side='right', padx=(6, 0))
+        Tooltip(self.tools_btn, 'Refresh Apple Music, import XML, and choose an artwork folder')
+        self.cancel_btn = ctk.CTkButton(choose, text='Cancel', width=70, state='disabled', command=self._cancel_work)
+        self.recommend_btn = ctk.CTkButton(choose, text='Recommend', width=110, command=self._recommend, state='disabled')
         self.recommend_btn.pack(side='right', padx=(8, 0))
         self.status = ctk.CTkLabel(self, text='Load playlists from the macOS Music app, or import an exported XML playlist.',
                                   anchor='w', wraplength=800, justify='left')
-        self.status.pack(fill='x', pady=4)
+        self.status.configure(height=20, font=ctk.CTkFont(size=12), text_color=MUTED)
+        self.status.pack(side='bottom', fill='x', pady=(2, 0))
         self.views = ctk.CTkTabview(self)
         self.views.pack(fill='both', expand=True)
         songs_tab = self.views.add('Songs')
+        filter_row = ctk.CTkFrame(songs_tab, fg_color='transparent')
+        filter_row.pack(fill='x', pady=(0, 3))
         self.song_filter = ctk.StringVar()
-        self.filter_entry = ctk.CTkEntry(songs_tab, textvariable=self.song_filter,
+        self.filter_entry = ctk.CTkEntry(filter_row, textvariable=self.song_filter,
                      placeholder_text='Search this playlist by song, artist, or album')
-        self.filter_entry.pack(fill='x', pady=(0, 6))
+        self.filter_entry.pack(side='left', fill='x', expand=True)
         self.filter_entry.bind('<Return>', lambda event: self._filter_songs())
         self.song_filter.trace_add('write', lambda *_: self._schedule_filter())
-        self.filter_count = ctk.CTkLabel(songs_tab, text='', anchor='w', text_color=MUTED, height=20)
-        self.filter_count.pack(fill='x')
+        self.filter_count = ctk.CTkLabel(filter_row, text='', anchor='w', text_color=MUTED, height=20)
+        self.filter_count.pack(side='right', padx=(10, 0))
         self.song_header = song_table.header(songs_tab)
         self.songs = ctk.CTkScrollableFrame(songs_tab)
         self.songs.pack(fill='both', expand=True)
@@ -83,11 +85,30 @@ class PlaylistsPage(ctk.CTkFrame):
         song_table.header(recommendations_tab, action_width=0)
         self.results = ctk.CTkScrollableFrame(recommendations_tab)
         self.results.pack(fill='both', expand=True)
+        self._renderer = DiscoveryRenderer(self.results, app, self._similar)
         self._poll_id = self.after(100, self._poll)
 
+    def _toggle_tools(self):
+        if self._tools_toolbar.winfo_manager():
+            self._tools_toolbar.pack_forget()
+        else:
+            self._tools_toolbar.pack(fill='x', pady=(0, 4), before=self.views)
+
     def _on_sidebar_open(self):
-        if not self._attempted_load and not self._busy and not self._playlists:
+        if self._busy:
+            return
+        if not self._playlists:
             self._load_library()
+        else:
+            self._open_music_library()
+
+    def _open_music_library(self):
+        # Use Music's playlist type, not its name: a user playlist may also
+        # be called 'music'. Imported XML lists have no native library type.
+        for label, playlist in self._playlists.items():
+            if playlist.special_kind.casefold() == 'music':
+                self._select(label)
+                break
 
     def _choose_artwork_folder(self):
         folder = filedialog.askdirectory(title='Choose a folder containing song thumbnails')
@@ -113,6 +134,7 @@ class PlaylistsPage(ctk.CTkFrame):
             widget.configure(state='disabled')
         self.app.tabs.set_playlists_busy(True)
         self.cancel_btn.configure(state='normal')
+        self.cancel_btn.pack(side='right', padx=(6, 0))
         self.status.configure(text=message)
         def run():
             try:
@@ -163,6 +185,8 @@ class PlaylistsPage(ctk.CTkFrame):
             f'Finding recommendations for {self._selected_name} from up to 8 evenly spaced songs…')
 
     def _clear(self, parent):
+        if parent is self.results:
+            self._renderer.cancel()
         for child in parent.winfo_children():
             child.destroy()
 
@@ -254,6 +278,7 @@ class PlaylistsPage(ctk.CTkFrame):
             self.load_btn.configure(state='normal')
             self.import_btn.configure(state='normal')
             self.cancel_btn.configure(state='disabled')
+            self.cancel_btn.pack_forget()
             if self._cancel.is_set():
                 self.status.configure(text='Cancelled. Previous results are still available.')
             elif error:
@@ -275,6 +300,7 @@ class PlaylistsPage(ctk.CTkFrame):
                 self.playlist_title.configure(text='Choose a playlist in the sidebar' if result else 'No playlists found')
                 self.app.tabs._set_playlists_expanded(True)
                 self.status.configure(text=f'{len(result)} playlists loaded. Choose a playlist to browse its songs.' if result else 'No playlists found. Open Music and sync your library, or import a playlist XML.')
+                self._open_music_library()
 
             elif kind == 'tracks':
                 self._selected_name, self._tracks = result
@@ -292,8 +318,7 @@ class PlaylistsPage(ctk.CTkFrame):
             elif kind == 'similar':
                 seed, related = result
                 self._clear(self.results)
-                for track in related:
-                    DiscoveryRow(self.results, self.app, track, self._similar, because=f'Because you chose {seed.artist} — {seed.title}')
+                self._renderer.show([(track, f'Because you chose {seed.artist} — {seed.title}') for track in related])
                 self.views.set('Recommendations')
                 self.status.configure(text=f'{len(related)} similar songs. Matched seed: {seed.artist} — {seed.title}.' if related else f'No related songs returned for {seed.title}.')
             elif kind == 'recommend':
@@ -302,11 +327,10 @@ class PlaylistsPage(ctk.CTkFrame):
                     ctk.CTkLabel(self.results, text='Seeds from ' + self._selected_name + ':\n' + '; '.join(result.seeds) +
                         '\nSame playlist order uses the same seeds. Songs suggested by more seeds rank higher.',
                         anchor='w', justify='left', wraplength=750, text_color=MUTED).pack(fill='x', padx=8, pady=8)
-                for item in result.suggestions:
-                    DiscoveryRow(self.results, self.app, item.track, self._similar, because='Related to: ' + '; '.join(item.because))
                 if result.skipped:
                     ctk.CTkLabel(self.results, text='Skipped seeds:\n' + '\n'.join(_safe_error(line) for line in result.skipped),
                                  anchor='w', text_color=MUTED, wraplength=700, justify='left').pack(fill='x', padx=8, pady=10)
+                self._renderer.show([(item.track, 'Related to: ' + '; '.join(item.because)) for item in result.suggestions])
                 self.views.set('Recommendations')
                 self.status.configure(text=f'{len(result.suggestions)} suggestions from {result.matched}/{result.attempted} seed songs. Existing playlist songs and duplicates excluded; up to 3 songs per artist.')
             if not self._busy:
@@ -316,6 +340,7 @@ class PlaylistsPage(ctk.CTkFrame):
 
     def destroy(self):
         self._closed = True
+        self._renderer.cancel()
         if self._filter_after is not None:
             self.after_cancel(self._filter_after)
         self._artwork.close()

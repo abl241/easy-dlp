@@ -56,6 +56,8 @@ class IdentifyPage(ctk.CTkFrame):
         header(self, action_width=0)
         self.results = ctk.CTkScrollableFrame(self)
         self.results.pack(fill="both", expand=True, pady=8)
+        from .discovery_widgets import DiscoveryRenderer
+        self._renderer = DiscoveryRenderer(self.results, app, self._similar_track)
         self._poll_id = self.after(100, self._poll)
 
     def _mode_changed(self, mode):
@@ -180,6 +182,7 @@ class IdentifyPage(ctk.CTkFrame):
                 self.status.configure(text=error)
             elif kind == "identify":
                 self._track = result
+                self._renderer.cancel()
                 for parent in (self.match, self.results):
                     for child in parent.winfo_children():
                         child.destroy()
@@ -187,16 +190,17 @@ class IdentifyPage(ctk.CTkFrame):
                 detail = f" Apple Music ID: {result.apple_id}." if result.apple_id else ""
                 self.status.configure(text="Song recognized." + detail + " Check the release before using its metadata.")
             else:
+                self._renderer.cancel()
                 for child in self.results.winfo_children():
                     child.destroy()
-                for track in result:
-                    self._row(self.results, track)
+                self._renderer.show([(track, '') for track in result])
                 self.status.configure(text=f"{len(result)} related songs for {self._related_seed.title}." if result else "Shazam returned no related songs for this track.")
             self.similar_btn.configure(state="normal" if self._track and self._track.key else "disabled")
         self._poll_id = self.after(100, self._poll)
 
     def destroy(self):
         self._closed = True
+        self._renderer.cancel()
         self._cancel.set()
         self.after_cancel(self._poll_id)
         super().destroy()

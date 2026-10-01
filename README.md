@@ -168,3 +168,5 @@ Main code areas: `gui.py` and `ui.py` for the desktop shell; `jobs.py` and `down
 Personal-use project under active development. macOS is the primary development environment; Windows and Linux launchers are included, but native Apple integrations are macOS-only. The app relies on third-party services whose availability can change.
 
 Dependencies retain their own licenses: [yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE) uses the Unlicense; FFmpeg licensing depends on the build. See each dependency for its terms.
+
+Similar-song results render in small batches to keep scrolling and clicks responsive. Successful lookups are cached for five minutes (up to 128 seeds); repeat visits reuse the results. Incoming discovery artwork is resized to the 48-pixel display size before updating both themes.
